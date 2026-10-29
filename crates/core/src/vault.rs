@@ -32,12 +32,16 @@ pub const HEADER_BLOCKS: u32 = 2;
 /// Shortest drive PIN the client accepts (see the spec's guessing-cost table).
 pub const MIN_DRIVE_PIN_LEN: usize = 8;
 
-/// PRF input that yields the vault secret (login), the same for every vault.
+/// PRF input that yields the vault secret (login) for accounts created before per-account
+/// seeds. New accounts use [`vault_salt`] with their own random seed instead.
 pub const VAULT_SALT: &[u8] = b"strongbox/vault-salt/v1";
 
 const L_DRIVE_SALT: &str = "strongbox/drive-salt/v1";
 const L_LOCATOR: &str = "strongbox/vault/locator/v1";
 const L_AUTH: &str = "strongbox/vault/auth/v1";
+const L_TRANSPORT: &str = "strongbox/vault/transport/v1";
+const L_REC_TRANSPORT: &str = "strongbox/vault/recovery-transport/v1";
+const L_VAULT_SEED: &str = "strongbox/vault-salt/seeded/v1";
 const L_REC_LOCATOR: &str = "strongbox/vault/recovery-locator/v1";
 const L_REC_AUTH: &str = "strongbox/vault/recovery-auth/v1";
 const L_ENTRY: &str = "strongbox/drive/entry/v1";
@@ -58,6 +62,17 @@ pub fn drive_salt(slot: u32, pin: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// PRF input for the vault login of an account with a random per-account `seed` (stored in its
+/// encrypted record). It makes the same credential on two servers yield unrelated secrets, so a
+/// hostile server cannot obtain another server's login or transport keys. `None` is an account
+/// from before seeds.
+pub fn vault_salt(seed: Option<&[u8; 32]>) -> Vec<u8> {
+    match seed {
+        None => VAULT_SALT.to_vec(),
+        Some(seed) => Sha256::digest(kdf::info(L_VAULT_SEED, &[seed])).to_vec(),
+    }
+}
+
 /// Check a drive PIN against the minimum length (digits or a passphrase).
 pub fn check_drive_pin(pin: &str) -> Result<()> {
     if pin.chars().count() < MIN_DRIVE_PIN_LEN {
@@ -75,18 +90,22 @@ pub struct MemberCreds {
     /// Sent at login; the server stores only its SHA-256.
     pub locator: [u8; 32],
     pub auth: SigningKey,
+    /// Symmetric key shared with the server (registered at sign-up) for the sealed channel
+    /// ([`crate::channel`]). Independent of every other key derived from the same secret.
+    pub transport: Key,
 }
 
 impl MemberCreds {
-    /// From the hmac-secret output for [`VAULT_SALT`].
+    /// From the hmac-secret output for [`vault_salt`].
     pub fn from_prf(prf_vault: &[u8; 32]) -> Self {
-        Self::derive(prf_vault, L_LOCATOR, L_AUTH)
+        Self::derive(prf_vault, L_LOCATOR, L_AUTH, L_TRANSPORT)
     }
 
-    fn derive(ikm: &[u8], locator: &str, auth: &str) -> Self {
+    fn derive(ikm: &[u8], locator: &str, auth: &str, transport: &str) -> Self {
         MemberCreds {
             locator: *kdf::derive(ikm, None, locator, &[]).as_bytes(),
             auth: SigningKey::from_bytes(kdf::derive(ikm, None, auth, &[]).as_bytes()),
+            transport: kdf::derive(ikm, None, transport, &[]),
         }
     }
 
@@ -149,6 +168,11 @@ pub struct UsernameKeys {
     /// The server's index for this username's record (sent in the clear).
     pub lookup: [u8; 32],
     record_key: Key,
+    /// The account's random PRF-salt seed. Outer `None`: not loaded yet. Otherwise set by
+    /// [`new_seed`](Self::new_seed) at sign-up or read back by [`open_record`](Self::open_record)
+    /// (inner `None`: an account from before seeds). Sealing a record before it is loaded would
+    /// drop the seed and lock the owner out, so [`seal_record`](Self::seal_record) refuses.
+    seed: std::sync::Mutex<Option<Option<[u8; 32]>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -163,6 +187,8 @@ pub struct VaultMemberLabel {
 struct CredentialRecord {
     credential_ids: Vec<serde_bytes::ByteBuf>,
     members: Vec<VaultMemberLabel>,
+    #[serde(default)]
+    seed: Option<serde_bytes::ByteBuf>,
 }
 
 impl UsernameKeys {
@@ -177,7 +203,20 @@ impl UsernameKeys {
         Ok(UsernameKeys {
             lookup: *kdf::derive(out.as_ref(), None, L_LOOKUP, &[]).as_bytes(),
             record_key: kdf::derive(out.as_ref(), None, L_RECORD, &[]),
+            seed: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Choose a fresh random seed for a new account.
+    pub fn new_seed(&self) {
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        *self.seed.lock().unwrap() = Some(Some(seed));
+    }
+
+    /// The PRF input for this account's vault login.
+    pub fn vault_salt(&self) -> Vec<u8> {
+        vault_salt(self.seed.lock().unwrap().and_then(|s| s).as_ref())
     }
 
     /// Encrypt the credential ids of this username's security keys.
@@ -186,6 +225,11 @@ impl UsernameKeys {
         credential_ids: &[Vec<u8>],
         members: &[VaultMemberLabel],
     ) -> Result<Vec<u8>> {
+        let seed = self
+            .seed
+            .lock()
+            .unwrap()
+            .ok_or(Error::Malformed("account seed not loaded"))?;
         if credential_ids.is_empty() || credential_ids.len() > MAX_RECORD_CREDENTIALS {
             return Err(Error::Malformed(
                 "credential record must hold 1-8 credentials",
@@ -198,6 +242,7 @@ impl UsernameKeys {
                 .map(|c| serde_bytes::ByteBuf::from(c.clone()))
                 .collect(),
             members: members.to_vec(),
+            seed: seed.map(|s| serde_bytes::ByteBuf::from(s.to_vec())),
         };
         ciborium::into_writer(&record, &mut cbor).map_err(|e| Error::Encoding(e.to_string()))?;
         if cbor.len() + 4 > RECORD_PLAIN {
@@ -224,6 +269,11 @@ impl UsernameKeys {
         .ok()?;
         let len = u32::from_be_bytes(plain.get(..4)?.try_into().ok()?) as usize;
         let record: CredentialRecord = ciborium::from_reader(plain.get(4..4 + len)?).ok()?;
+        let seed = match &record.seed {
+            None => None,
+            Some(s) => Some(<[u8; 32]>::try_from(s.as_slice()).ok()?),
+        };
+        *self.seed.lock().unwrap() = Some(seed);
         Some((
             record
                 .credential_ids
@@ -263,7 +313,12 @@ impl RecoveryCode {
 
     /// Credentials to log in to the vault as this recovery code's member.
     pub fn member_creds(&self) -> MemberCreds {
-        MemberCreds::derive(self.secret.as_ref(), L_REC_LOCATOR, L_REC_AUTH)
+        MemberCreds::derive(
+            self.secret.as_ref(),
+            L_REC_LOCATOR,
+            L_REC_AUTH,
+            L_REC_TRANSPORT,
+        )
     }
 
     pub fn entry_key(&self, slot: u32) -> Key {
@@ -624,8 +679,38 @@ mod tests {
     }
 
     #[test]
+    fn seeds_and_transport_keys() {
+        let k = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
+        assert_eq!(k.vault_salt(), VAULT_SALT, "no seed: the pre-seed salt");
+        assert!(
+            k.seal_record(&[vec![1; 64]], &[]).is_err(),
+            "must not seal a record before the seed is known"
+        );
+        k.new_seed();
+        let salt = k.vault_salt();
+        assert_ne!(salt, VAULT_SALT);
+        // The seed survives the encrypted record, and differs between accounts.
+        let record = k.seal_record(&[vec![1; 64]], &[]).unwrap();
+        let again = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
+        assert!(again.open_record(&record).is_some());
+        assert_eq!(again.vault_salt(), salt);
+        let other = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
+        other.new_seed();
+        assert_ne!(other.vault_salt(), salt);
+        // The transport key is separate from the login material derived from the same PRF.
+        let m = MemberCreds::from_prf(&prf(1));
+        assert_ne!(m.transport.as_bytes(), &m.locator);
+        assert_ne!(m.transport.as_bytes(), m.auth.as_bytes());
+        assert_ne!(
+            m.transport.as_bytes(),
+            MemberCreds::from_prf(&prf(2)).transport.as_bytes()
+        );
+    }
+
+    #[test]
     fn username_records() {
         let a = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
+        a.new_seed();
         let a2 = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
         let other_server = UsernameKeys::derive("quiet-river-lantern", "srv2").unwrap();
         let b = UsernameKeys::derive("someone-else", "srv").unwrap();

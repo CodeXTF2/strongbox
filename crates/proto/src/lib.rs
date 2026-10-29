@@ -16,6 +16,20 @@ pub struct ServerInfo {
     pub vault: VaultLayout,
 }
 
+// ---------------------------------------------------------------- sealed channel
+// Only `GET /v1/info`, `GET /v2/lookup/{id}`, `POST /v2/vaults` (sign-up), `POST /v2/channel`
+// and `POST /v2/rpc` are served in the clear; every other route is reachable only inside the
+// sealed channel (`strongbox_core::channel`), as a request carried by `POST /v2/rpc`.
+//
+// `POST /v2/channel` (hello): body = member id (SHA-256 of the locator, 32 bytes) || client
+// nonce (32 bytes). Reply = server nonce (32) || session id (16) || confirm tag (32).
+//
+// `POST /v2/rpc`: body = session id (16) || counter (8, big endian) || sealed request; the
+// reply body is the sealed response. Failures at the channel level are a plain `ApiError`.
+
+pub const CHANNEL_HELLO_PATH: &str = "/v2/channel";
+pub const CHANNEL_RPC_PATH: &str = "/v2/rpc";
+
 // ---------------------------------------------------------------- /v2 vaults
 // See docs/deniable-drives.md. The server sees vault ids, member locator hashes and public
 // keys, and whole fixed-size blocks; never which slots are in use.
@@ -42,6 +56,10 @@ pub struct CreateVaultRequest {
     pub locator: Vec<u8>,
     #[serde(with = "serde_b64")]
     pub auth_public_key: Vec<u8>,
+    /// The member's sealed-channel key (see `strongbox_core::channel`). Sent once, at sign-up,
+    /// which must happen on a network the client trusts.
+    #[serde(with = "serde_b64")]
+    pub transport_key: Vec<u8>,
     pub invite: Option<String>,
 }
 
@@ -83,6 +101,8 @@ pub struct AddMemberRequest {
     pub locator: Vec<u8>,
     #[serde(with = "serde_b64")]
     pub auth_public_key: Vec<u8>,
+    #[serde(with = "serde_b64")]
+    pub transport_key: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

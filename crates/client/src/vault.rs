@@ -17,7 +17,7 @@ use strongbox_core::vault::{
     self as v, check_drive_pin, drive_salt, entry_key, header_entries, open_header,
     open_header_body, Entry, EntryKind, HeaderBody, MemberCreds, RecoveryCode, UsernameKeys, VDir,
     VFile, VNode, VaultGrant, VaultMemberLabel, BLOCK_PAYLOAD, HEADER_BLOCKS, KEY_ENTRIES,
-    RECOVERY_ENTRY, VAULT_SALT,
+    RECOVERY_ENTRY,
 };
 use strongbox_core::Key;
 use strongbox_fido::{Authenticator, VAULT_USER_NAME};
@@ -125,6 +125,19 @@ async fn login(
     members: Vec<VaultMemberLabel>,
     creds: &MemberCreds,
 ) -> Result<VaultClient> {
+    // From here on everything is sealed under the member's transport key, which the server must
+    // prove it holds: a proxy that cannot do that never sees the challenge, signature or token.
+    api.open_channel(&v::locator_hash(&creds.locator), &creds.transport)
+        .await?;
+    // The server id and layout came from the clear-text `/v1/info`, and the client has
+    // acted on them (key derivation, slot checks, block placement). Confirm them now that
+    // they can be fetched authenticated.
+    let sealed = api.sealed_info().await?;
+    if sealed.server_id != server_id || sealed.vault != layout {
+        return Err(Error::Invalid(
+            "the server's details differ from what the network showed; refusing to continue".into(),
+        ));
+    }
     let mut session = None;
     for attempt in 0..3 {
         let challenge = api.vault_challenge(&creds.locator).await?;
@@ -185,7 +198,8 @@ pub async fn connect_account(
     let keys = username_keys(username, &server_id).await?;
     let (credentials, members) = credentials(&api, &keys).await?;
     let allow = credentials.clone();
-    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, None)).await?;
+    let vsalt = keys.vault_salt();
+    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, None)).await?;
     login(
         api,
         &server_id,
@@ -226,16 +240,17 @@ pub async fn connect_account_with_recovery(
 async fn enroll_with_vault_secret(
     authn: Arc<dyn Authenticator>,
     exclude: &[Vec<u8>],
+    vault_salt: &[u8],
 ) -> Result<(Vec<u8>, zeroize::Zeroizing<[u8; 32]>)> {
-    let (a, exclude) = (authn.clone(), exclude.to_vec());
+    let (a, exclude, salt) = (authn.clone(), exclude.to_vec(), vault_salt.to_vec());
     let enrolled =
-        blocking(move || a.enroll_prf(DEFAULT_RP_ID, VAULT_USER_NAME, &exclude, VAULT_SALT))
-            .await?;
+        blocking(move || a.enroll_prf(DEFAULT_RP_ID, VAULT_USER_NAME, &exclude, &salt)).await?;
     if let Some(first) = enrolled.first {
         return Ok((enrolled.credential_id, first));
     }
     let allow = vec![enrolled.credential_id.clone()];
-    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, None)).await?;
+    let salt = vault_salt.to_vec();
+    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &salt, None)).await?;
     Ok((enrolled.credential_id, pair.first))
 }
 
@@ -261,7 +276,10 @@ pub async fn create_vault_named(
     let (api, server_id, layout) = server(server_url).await?;
     let keys = username_keys(username, &server_id).await?;
     let retry_authn = authn.clone();
-    let (cred, first) = enroll_with_vault_secret(authn, &[]).await?;
+    // A fresh random seed in the account record makes this account's login secrets unrelated
+    // to those of any other server, even for the same credential.
+    keys.new_seed();
+    let (cred, first) = enroll_with_vault_secret(authn, &[], &keys.vault_salt()).await?;
     let creds = MemberCreds::from_prf(&first);
     let credentials = vec![cred];
     let members = vec![VaultMemberLabel {
@@ -275,6 +293,7 @@ pub async fn create_vault_named(
         record: keys.seal_record(&credentials, &members)?,
         locator: creds.locator.to_vec(),
         auth_public_key: creds.public_key().to_vec(),
+        transport_key: creds.transport.as_bytes().to_vec(),
         invite,
     })
     .await?;
@@ -308,7 +327,8 @@ pub async fn connect(
     let (credentials, members) = credentials(&api, &keys).await?;
     let salt = drive_salt(slot, pin);
     let allow = credentials.clone();
-    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, Some(&salt))).await?;
+    let vsalt = keys.vault_salt();
+    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
     let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
     let member = MemberCreds::from_prf(&pair.first);
     let member_id = member_id(&member.locator);
@@ -380,8 +400,8 @@ impl VaultClient {
         check_slot(&self.inner.layout, slot)?;
         let salt = drive_salt(slot, pin);
         let allow = self.inner.credentials.lock().unwrap().clone();
-        let pair =
-            blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, Some(&salt))).await?;
+        let vsalt = self.inner.username.vault_salt();
+        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let member = MemberCreds::from_prf(&pair.first);
         Ok(SlotKey {
@@ -596,7 +616,8 @@ impl VaultClient {
                 v::MAX_RECORD_CREDENTIALS
             )));
         }
-        let (credential, first) = enroll_with_vault_secret(authn, &credentials).await?;
+        let vsalt = self.inner.username.vault_salt();
+        let (credential, first) = enroll_with_vault_secret(authn, &credentials, &vsalt).await?;
         let member = MemberCreds::from_prf(&first);
         self.add_member(&member).await?;
         credentials.push(credential);
@@ -648,6 +669,7 @@ impl VaultClient {
         let req = AddMemberRequest {
             locator: creds.locator.to_vec(),
             auth_public_key: creds.public_key().to_vec(),
+            transport_key: creds.transport.as_bytes().to_vec(),
         };
         match self.api().add_vault_member(&req).await {
             Ok(()) | Err(Error::Api { status: 409, .. }) => Ok(()),
@@ -818,8 +840,8 @@ impl VaultDrive {
         };
         let salt = drive_salt(self.slot, pin);
         let allow = vec![credential];
-        let pair =
-            blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, Some(&salt))).await?;
+        let vsalt = self.client.inner.username.vault_salt();
+        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let member = MemberCreds::from_prf(&pair.first);
         if member_id(&member.locator) != known_id {
@@ -872,8 +894,8 @@ impl VaultDrive {
         };
         let salt = drive_salt(self.slot, new_pin);
         let allow = vec![credential];
-        let pair =
-            blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, Some(&salt))).await?;
+        let vsalt = self.client.inner.username.vault_salt();
+        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         if member_id(&MemberCreds::from_prf(&pair.first).locator) != current {
             return Err(Error::Invalid(
@@ -1466,8 +1488,8 @@ impl VaultDrive {
         let (a, ex) = (authn.clone(), existing.clone());
         let cred = blocking(move || a.enroll(DEFAULT_RP_ID, VAULT_USER_NAME, &ex)).await?;
         let allow = vec![cred.clone()];
-        let pair =
-            blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, Some(&salt))).await?;
+        let vsalt = inner.username.vault_salt();
+        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let ek = entry_key(&second);
         let member_creds = MemberCreds::from_prf(&pair.first);

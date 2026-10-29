@@ -19,9 +19,14 @@ type St = State<Arc<AppState>>;
 
 pub fn router(state: Arc<AppState>) -> Router {
     let debug = state.config.debug;
+    // Everything except sign-up, the record lookup and the channel itself is served only
+    // inside the sealed channel, through this router.
+    let sealed: Router = crate::vault_api::sealed_routes(&state).with_state(state.clone());
     let router = Router::new()
         .route("/v1/info", get(info))
-        .merge(crate::vault_api::routes(&state))
+        .merge(crate::vault_api::plain_routes())
+        .merge(crate::channel_api::routes())
+        .layer(axum::Extension(sealed))
         .layer(middleware::map_response(security_headers));
     // Request traces record paths, which contain lookup and member ids: debug only.
     let router = if debug {
@@ -107,7 +112,7 @@ pub(crate) fn decoy_bytes(secret: &[u8], username: &str, what: &str, len: usize)
         .collect()
 }
 
-async fn info(State(s): St) -> Json<ServerInfo> {
+pub(crate) async fn info(State(s): St) -> Json<ServerInfo> {
     Json(ServerInfo {
         server_id: s.server_id.clone(),
         software_version: env!("CARGO_PKG_VERSION").into(),

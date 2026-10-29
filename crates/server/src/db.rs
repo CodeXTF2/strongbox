@@ -118,6 +118,7 @@ impl Db {
     /// Create a vault with its username record and first member. If `spend_invite` names a
     /// single-use code it is deleted in the same transaction, so a code admits exactly one
     /// account and is not spent when the creation fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_vault(
         &self,
         vault_id: &str,
@@ -125,6 +126,7 @@ impl Db {
         record: &[u8],
         locator_hash: &[u8],
         public_key: &[u8],
+        transport_key: &[u8],
         spend_invite: Option<i64>,
     ) -> sqlx::Result<CreateVault> {
         let _w = self.write_lock.lock().await;
@@ -149,10 +151,11 @@ impl Db {
                 .bind(record)
                 .execute(&mut *tx)
                 .await,
-            sqlx::query("INSERT INTO vault_members (locator_hash, vault_id, auth_public_key) VALUES (?, ?, ?)")
+            sqlx::query("INSERT INTO vault_members (locator_hash, vault_id, auth_public_key, transport_key) VALUES (?, ?, ?, ?)")
                 .bind(locator_hash)
                 .bind(vault_id)
                 .bind(public_key)
+                .bind(transport_key)
                 .execute(&mut *tx)
                 .await,
         ] {
@@ -221,6 +224,17 @@ impl Db {
         .map(|r| (r.get("vault_id"), r.get("auth_public_key"))))
     }
 
+    /// The member's sealed-channel key, if it has one.
+    pub async fn member_transport_key(&self, locator_hash: &[u8]) -> sqlx::Result<Option<Vec<u8>>> {
+        Ok(
+            sqlx::query("SELECT transport_key FROM vault_members WHERE locator_hash = ?")
+                .bind(locator_hash)
+                .fetch_optional(&self.pool)
+                .await?
+                .and_then(|r| r.get("transport_key")),
+        )
+    }
+
     pub async fn vault_members(&self, vault_id: &str) -> sqlx::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let rows = sqlx::query("SELECT locator_hash, auth_public_key FROM vault_members WHERE vault_id = ? ORDER BY locator_hash")
             .bind(vault_id)
@@ -238,6 +252,7 @@ impl Db {
         vault_id: &str,
         locator_hash: &[u8],
         public_key: &[u8],
+        transport_key: &[u8],
         max: usize,
     ) -> sqlx::Result<MemberAdd> {
         let _w = self.write_lock.lock().await;
@@ -250,11 +265,12 @@ impl Db {
             return Ok(MemberAdd::TooMany);
         }
         match sqlx::query(
-            "INSERT INTO vault_members (locator_hash, vault_id, auth_public_key) VALUES (?, ?, ?)",
+            "INSERT INTO vault_members (locator_hash, vault_id, auth_public_key, transport_key) VALUES (?, ?, ?, ?)",
         )
         .bind(locator_hash)
         .bind(vault_id)
         .bind(public_key)
+        .bind(transport_key)
         .execute(&self.pool)
         .await
         {
@@ -331,12 +347,14 @@ impl Db {
     pub async fn add_invite(&self, code: &str, single_use: bool) -> sqlx::Result<InviteAdd> {
         let _w = self.write_lock.lock().await;
         let created_at = now();
-        match sqlx::query("INSERT INTO invite_codes (code, single_use, created_at) VALUES (?, ?, ?)")
-            .bind(code)
-            .bind(single_use as i64)
-            .bind(created_at)
-            .execute(&self.pool)
-            .await
+        match sqlx::query(
+            "INSERT INTO invite_codes (code, single_use, created_at) VALUES (?, ?, ?)",
+        )
+        .bind(code)
+        .bind(single_use as i64)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await
         {
             Ok(r) => Ok(InviteAdd::Added(InviteCode {
                 id: r.last_insert_rowid(),

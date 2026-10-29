@@ -34,7 +34,7 @@ Likewise for usernames, under two threat models:
 |---|---|
 | Multiple snapshots, or a server recording writes | Slots that change between snapshots without the opened drives accounting for it reveal hidden activity. Defeating this needs ORAM-style access hiding. |
 | A malicious server from the start | It can log which slots and blocks each session reads and writes, and keep the filler seed. |
-| Network observation | IP address and timing link sessions; use Tor if that matters. |
+| Network observation | IP address, timing and message sizes link sessions; use Tor if that matters. Content is protected from a hostile network by the sealed channel (§8.1), but see its limits. |
 | Plaintext the user exports | Downloaded files, OS caches, thumbnails, swap. |
 | Coercion game theory | Deniability means the adversary cannot *prove* more drives exist. An adversary who knows the software supports hidden drives may keep coercing anyway. Users must understand this. |
 | Data destruction | An adversary with the key and PIN can "reset" every slot, wiping hidden drives, without learning anything. |
@@ -131,24 +131,33 @@ credentials are created with `credProtect` level 3 so that CTAP 2.0 keys cannot 
 `H` = SHA-256, `KDF(ikm, label, parts)` = HKDF-SHA256 as above.
 
 ```
-VAULT_SALT          = "strongbox/vault-salt/v1"
+seed                = 32 random bytes per account, stored in its encrypted record
+vault_salt          = H("strongbox/vault-salt/seeded/v1" ‖ 0 ‖ u32be(32) ‖ seed)
+                      (accounts from before seeds used the constant "strongbox/vault-salt/v1")
 drive_salt(i, pin)  = H("strongbox/drive-salt/v1" ‖ 0 ‖ u32be(i) ‖ pin)
 
-prf_v = PRF(VAULT_SALT),  prf_d = PRF(drive_salt(i, pin))     -- same touch
+prf_v = PRF(vault_salt),  prf_d = PRF(drive_salt(i, pin))     -- same touch
 
 locator      = KDF(prf_v, "strongbox/vault/locator/v1")         -- 32 bytes, sent at login
 auth seed    = KDF(prf_v, "strongbox/vault/auth/v1")            -- Ed25519
+transport    = KDF(prf_v, "strongbox/vault/transport/v1")       -- sealed-channel key (§8.1)
 entry key    = KDF(prf_d, "strongbox/drive/entry/v1")           -- wraps the drive key
 ```
 
-The server stores `H(locator)` only. Different keys have different `prf_v` and are separate
+The per-account `seed` makes the PRF input differ between accounts, so signing up to two
+servers with the same credential (or any reuse of one) still yields unrelated `locator`,
+`auth` and `transport` values: a hostile server cannot obtain another server's login or
+channel keys. The seed is only readable by someone who can decrypt the record, i.e. who knows
+the username.
+
+The server stores `H(locator)`, the Ed25519 public key and the `transport` key only. Different keys have different `prf_v` and are separate
 **members** of the same vault.
 
 **Account recovery codes** are account members: they can authenticate to the account but
 have no drive entry, so they do not open any drive. **Drive recovery codes** are per drive:
 one 256-bit random secret `R`, shown as 52 base32 characters. Both uses are derived from the
 whole secret under separate labels: the vault member locator and auth key
-(`strongbox/vault/recovery-locator/v1`, `…/recovery-auth/v1`) and the drive's recovery entry
+(`strongbox/vault/recovery-locator/v1`, `…/recovery-auth/v1`, `…/recovery-transport/v1`) and the drive's recovery entry
 key (`strongbox/drive/recovery-entry/v1`, part `u32be(slot)`). Splitting `R` into halves
 would leave each use at 128 bits, which Grover-style quantum search would reduce to 2^64;
 deriving both from all of `R` keeps each at 256 bits for the same code length. The client
@@ -263,6 +272,57 @@ The client requires at least 8 digits and recommends 10, or a passphrase.
 | `GET /v2/members`, `POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys / recovery codes (last member cannot be removed) |
 | `GET /v2/slots/{slot}/blocks?start&count` | bearer | read whole blocks |
 | `PUT /v2/slots/{slot}/blocks?start` | bearer | write whole blocks (body = n × BLOCK) |
+| `POST /v2/channel`, `POST /v2/rpc` | – | the sealed channel (§8.1) |
+
+Only `GET /v1/info`, `GET /v2/lookup/{id}`, `POST /v2/vaults`, `POST /v2/channel` and
+`POST /v2/rpc` are served in the clear. Every other row above is reachable only as a request
+carried inside the sealed channel (anywhere else it is a 404).
+
+### 8.1 Sealed channel
+
+TLS is treated as optional protection. After sign-up every call is an end-to-end encrypted
+and authenticated message, so a hostile HTTP or SOCKS proxy, or a forged TLS certificate,
+sees only ciphertext.
+
+- **Key.** One symmetric `transport` key per member (a security key or a recovery code),
+  derived from its PRF output / recovery secret (§5) and registered with the server at
+  sign-up (`POST /v2/vaults`, `POST /v2/members`). It is independent of every key that
+  protects data: holding it lets the server authenticate and decrypt transport, never a vault.
+- **Authenticated copies of clear data.** The server id and vault layout arrive in the clear
+  (`GET /v1/info`) because the client needs them before it can touch its key. Right after the
+  channel opens the client fetches them again inside it (`GET /v2/info`) and aborts if they
+  differ.
+- **Hello.** `POST /v2/channel`: `H(locator) ‖ client nonce (32)` → `server nonce (32) ‖ session
+  id (16) ‖ confirm`, where `confirm = KDF(transport, "strongbox/channel/confirm/v1", client
+  nonce, server nonce, session id)`. Only a holder of `transport` can compute it for the
+  client's fresh nonce, so the client aborts if it does not match. An unknown member (or one
+  without a transport key) gets random bytes of the same size.
+- **Session keys.** `KDF(transport, "strongbox/channel/c2s/v1" | "…/s2c/v1", client nonce,
+  server nonce, session id)`: one key per direction.
+- **Messages.** `POST /v2/rpc` with `session id ‖ counter (u64 BE) ‖ XChaCha20-Poly1305(c2s,
+  nonce = counter, aad = session id ‖ counter, request)`. The request holds the method, path
+  and query, bearer token and body. The reply is sealed under the s2c key with the same
+  counter, so it is bound to its request. The server then runs the decrypted request through
+  the ordinary router; login (challenge and Ed25519 session) and the bearer token happen
+  inside the channel.
+- **Replay.** Counters start at 1 and each is accepted once, within a sliding window of 1024
+  (parallel transfers reorder slightly). The server checks the window, authenticates, and only
+  then commits the counter, so a forger cannot burn counters. Sessions live in memory only and
+  expire with the login session.
+- **Trust assumptions.** Sign-up must happen on a network the user trusts: it carries the
+  transport key in the clear. Nothing is stored on the client.
+- **Limits.** A network adversary still sees IP addresses, timing, message sizes, the lookup id
+  (so a weak username can be guessed offline, as against a seized server; this only lets it
+  forge or replay the unsealed record, which denies service but cannot yield the transport
+  key) and the member id at hello. It can drop or corrupt traffic (denial of service), and
+  delay a message and deliver it later: counters stop duplicates, not late delivery within the
+  window, so a stale write can land after a newer one (the same rollback a malicious server
+  could cause, §9). There
+  is no forward secrecy for the transport: a later disclosure of the server's stored transport
+  keys would let recorded traffic be decrypted (file contents stay end-to-end encrypted). It
+  does not detect a server serving stale or rolled-back blocks (§9).
+- **Accounts created before the channel** have no transport key and cannot sign in; they must
+  be recreated.
 
 Deniability requirements on the server:
 

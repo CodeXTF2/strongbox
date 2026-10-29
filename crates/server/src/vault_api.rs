@@ -85,11 +85,21 @@ impl VaultSessions {
     }
 }
 
-pub fn routes(state: &AppState) -> Router<Arc<AppState>> {
+/// Routes served in the clear: sign-up and the username record lookup (needed before the
+/// client has touched its key, so before a channel can exist).
+pub fn plain_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/v2/vaults", post(create_vault))
+        .route("/v2/lookup/{lookup}", get(lookup))
+}
+
+/// Routes reachable only inside the sealed channel (`channel_api::rpc`).
+pub fn sealed_routes(state: &AppState) -> Router<Arc<AppState>> {
     let bs = state.vaults.layout.block_size as usize;
     Router::new()
-        .route("/v2/vaults", post(create_vault).delete(delete_account))
-        .route("/v2/lookup/{lookup}", get(lookup))
+        .route("/v2/vaults", delete(delete_account))
+        // `/v1/info` again, but authenticated: the client compares the two.
+        .route("/v2/info", get(crate::api::info))
         .route("/v2/record", put(update_record))
         .route("/v2/auth/challenge", post(challenge))
         .route("/v2/auth/session", post(create_session).delete(logout))
@@ -150,8 +160,10 @@ async fn create_vault(
     rate_limit(&s, &ip)?;
     let spend_invite = check_registration(&s, req.invite.as_deref()).await?;
     let lh = locator_of(&req.locator)?;
-    if req.auth_public_key.len() != 32 {
-        return Err(AppError::bad_request("auth_public_key must be 32 bytes"));
+    if req.auth_public_key.len() != 32 || req.transport_key.len() != 32 {
+        return Err(AppError::bad_request(
+            "auth_public_key and transport_key must be 32 bytes",
+        ));
     }
     check_record(&req.lookup, &req.record)?;
     if s.db.vault_record(&req.lookup).await?.is_some() || s.db.vault_member(&lh).await?.is_some() {
@@ -180,6 +192,7 @@ async fn create_vault(
             &req.record,
             &lh,
             &req.auth_public_key,
+            &req.transport_key,
             spend_invite,
         )
         .await?
@@ -363,12 +376,20 @@ async fn add_member(
     Json(req): Json<AddMemberRequest>,
 ) -> AppResult<StatusCode> {
     let lh = locator_of(&req.locator)?;
-    if req.auth_public_key.len() != 32 {
-        return Err(AppError::bad_request("auth_public_key must be 32 bytes"));
+    if req.auth_public_key.len() != 32 || req.transport_key.len() != 32 {
+        return Err(AppError::bad_request(
+            "auth_public_key and transport_key must be 32 bytes",
+        ));
     }
     match s
         .db
-        .add_vault_member(&auth.vault, &lh, &req.auth_public_key, MAX_MEMBERS)
+        .add_vault_member(
+            &auth.vault,
+            &lh,
+            &req.auth_public_key,
+            &req.transport_key,
+            MAX_MEMBERS,
+        )
         .await?
     {
         MemberAdd::Added => Ok(StatusCode::NO_CONTENT),

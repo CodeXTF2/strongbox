@@ -40,6 +40,7 @@ async fn redirects_are_not_followed() {
         let mut api = Api::new(&redirector).unwrap();
         api.set_token("secret-session-token".into());
         assert!(api.info().await.is_err(), "{status} must not be followed");
+        assert!(api.vault_record(&[0u8; 32]).await.is_err());
         assert!(api.vault_members().await.is_err());
     }
     assert_eq!(

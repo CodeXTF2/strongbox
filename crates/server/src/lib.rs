@@ -6,6 +6,7 @@
 
 pub mod admin;
 pub mod api;
+pub mod channel_api;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -49,6 +50,7 @@ pub struct AppState {
     pub prelogin_limiter: ratelimit::RateLimiter,
     pub vaults: vaultstore::VaultStore,
     pub vault_sessions: vault_api::VaultSessions,
+    pub channels: channel_api::Channels,
     pub started: std::time::Instant,
 }
 
@@ -192,6 +194,7 @@ pub async fn build_all(config: Config) -> anyhow::Result<(Router, Router)> {
     let state = Arc::new(AppState {
         vaults,
         vault_sessions: Default::default(),
+        channels: Default::default(),
         prelogin_limiter: ratelimit::RateLimiter::new(config.prelogin_rate_per_minute),
         config,
         db,
@@ -206,6 +209,7 @@ pub async fn build_all(config: Config) -> anyhow::Result<(Router, Router)> {
             tokio::time::sleep(Duration::from_secs(600)).await;
             janitor.prelogin_limiter.purge();
             janitor.vault_sessions.purge();
+            janitor.channels.purge();
         }
     });
 

@@ -25,8 +25,9 @@ fixed-size slot files per vault, single binary.
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `GET /v1/info` | – | server id (pinned by clients), registration mode, vault layout |
-| `POST /v2/vaults` | invite/open | create an account and allocate its vault |
+| `GET /v1/info` | – | server id, registration mode, vault layout |
+| `POST /v2/vaults` | invite/open | create an account and allocate its vault (carries the first member's transport key; sent in the clear, so sign up on a trusted network) |
+| `POST /v2/channel`, `POST /v2/rpc` | – | sealed channel: every other call below travels inside it (see [deniable-drives.md §8.1](deniable-drives.md#81-sealed-channel)) |
 | `DELETE /v2/vaults` | bearer | delete the account and every drive |
 | `GET /v2/lookup/{id}` | – (rate-limited) | encrypted credential record, or a stable decoy |
 | `PUT /v2/record` | bearer | replace the record (backup keys, recovery codes) |
@@ -54,6 +55,19 @@ registration invite-only.
 ## 3. Hardening backlog
 
 - TLS only (enforced by the client except on localhost) and HSTS at the proxy.
+- **Sealed channel (done).** TLS is treated as optional protection: after sign-up every API
+  call is an XChaCha20-Poly1305 message (`POST /v2/rpc`) under keys derived from a per-member
+  `transport_key` (from the security-key PRF output or recovery code, registered at sign-up).
+  A hostile proxy, or a forged TLS certificate, sees only ciphertext lengths and cannot read,
+  alter or replay messages (each counter is accepted once, within a 1024-wide window), nor answer a hello
+  (the server must prove it holds the key). Only `/v1/info`, the record lookup, sign-up and the
+  hello are in the clear. **Sign-up must happen on a network the user trusts**: it carries the
+  transport key. Each account also has a random seed in its encrypted record that salts the
+  PRF input, so the same credential on two servers yields unrelated secrets. Accounts created
+  before this change have no transport key and must be recreated. Still visible to a proxy:
+  IPs, timing, message sizes, the lookup id and the member id at hello. No forward secrecy
+  against later disclosure of the server's stored transport keys (file contents are
+  end-to-end encrypted regardless).
 - **Logging (done, first step).** By default the server logs nothing that identifies a user,
   object or request: no request traces, no IPs, no usernames or ids, errors only as coarse
   categories, and `RUST_LOG` is ignored so an environment variable cannot turn that off. The

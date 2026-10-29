@@ -47,15 +47,17 @@ The comic below shows the kind of problem this design is intended to address.
 
 ### Account to drive flow
 
-Blue: other accounts on the same key. Yellow: vault existence. Red: the attack each design
-choice mitigates (dotted edges).
+Blue: other accounts on the same key, and the sealed transport. Yellow: vault existence. Red: the
+attack each design choice mitigates (dotted edges). Sign-up and the username record lookup are
+the only calls in the clear; sign-up must happen on a network you trust.
 
 ```mermaid
 flowchart TD
   subgraph flow["Account to drive flow"]
     U["Username (secret)"] -->|"Argon2id, 64 MiB per guess"| L["Lookup id"]
     L -->|"encrypted record, or a stable same-size decoy"| K["Security key + PIN<br/>non-discoverable credential, credProtect 3"]
-    K -->|"touch 1: VAULT_SALT → 256-bit PRF"| V["Vault login"]
+    K -->|"touch 1: seeded vault salt → 256-bit PRF"| C["Sealed channel<br/>transport key from the PRF, AEAD + counters"]
+    C -->|"challenge + Ed25519 login, all sealed"| V["Vault login"]
     V -->|"slot i + drive PIN"| K2["Security key touch 2: drive_salt(i, PIN)"]
     K2 -->|"correct"| O["Drive opened<br/>commit wipes old metadata"]
     K2 -->|"wrong PIN or unused slot"| N["Same 'No drive found' error"]
@@ -79,6 +81,11 @@ flowchart TD
   subgraph keyonly["Key + PIN only"]
     T8["List accounts on the key"]
   end
+  subgraph network["Hostile proxy or forged TLS certificate"]
+    T9["Read tokens, paths, blocks"]
+    T10["Forge, replay or reorder requests; impersonate the server"]
+    T11["Reuse one server's login or channel keys on another"]
+  end
 
   L -.->|mitigates| T1
   K -.->|mitigates| T2
@@ -89,13 +96,16 @@ flowchart TD
   K2 -.->|mitigates| T6
   O -.->|mitigates| T7
   K -.->|mitigates| T8
+  C -.->|mitigates| T9
+  C -.->|mitigates| T10
+  S2["Per-account random seed in the sealed record"] -.->|mitigates| T11
 
   classDef account fill:#d1ecf1,stroke:#0c5460,color:#000
   classDef vault fill:#fff3cd,stroke:#b58900,color:#000
   classDef threat fill:#f8d7da,stroke:#721c24,color:#000
-  class L,K account
-  class N,S vault
-  class T1,T2,T3,T4,T5,T6,T7,T8 threat
+  class L,K,C account
+  class N,S,S2 vault
+  class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 threat
 ```
 
 - **Account existence:** not deniable. Registration reveals whether a username is taken, so anyone
@@ -192,6 +202,23 @@ light/dark themes. Vaults have no trash: deletion is permanent.
 
 Plain `http://` is accepted only for localhost. Real deployments go behind TLS (see `deploy/`).
 
+### Transport security
+
+TLS is treated as optional protection. After sign-up, every API call is sealed in an
+end-to-end encrypted, authenticated channel keyed by a per-key `transport_key` derived from the
+security key's PRF output (or a recovery code), so a hostile HTTP/SOCKS proxy, or a forged TLS
+certificate, sees only ciphertext and cannot read, alter, replay or answer requests (it can
+drop or delay them). Nothing is
+pinned or stored on the computer. Two things to know:
+
+- **Sign up on a network you trust.** Sign-up (and the username record lookup) are the only
+  calls in the clear, and sign-up carries the transport key.
+- **Accounts created before the sealed channel cannot sign in** and must be recreated
+  (`reset-server.bat` for a local test server).
+
+Still visible to a network observer: IP addresses, timing and message sizes. Details and
+limits: [deniable-drives.md §8.1](docs/deniable-drives.md#81-sealed-channel).
+
 Without a security key, for UI development only, build with the insecure software
 authenticator and point it at a state file:
 
@@ -220,7 +247,9 @@ authenticator: two usernames on one key, decoy and hidden drives, wrong PIN vs u
 backup keys, recovery codes, account deletion, and the seized-server view (identical slot
 files, no plaintext, no usernames).
 `crates/client/tests/transport.rs` checks that the client never follows redirects and refuses
-plain HTTP to remote hosts.
+plain HTTP to remote hosts. `crates/client/tests/hostile_proxy.rs` puts a recording, tampering
+proxy between client and server: nothing but ciphertext crosses it, and replayed, forged,
+tampered and impersonated messages are refused.
 
 ## Status
 

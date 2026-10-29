@@ -4,6 +4,7 @@
 //! blocks and opaque account records. See `docs/deniable-drives.md` for the key hierarchy.
 
 pub mod aead;
+pub mod channel;
 pub mod error;
 pub mod ids;
 pub mod kdf;
