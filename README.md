@@ -43,22 +43,55 @@ The comic below is a useful reminder that encryption cannot solve every part of 
 
 ### Account to drive flow
 
-The two deniable points are shaded: blue for other accounts on the same key, yellow for vault existence.
+Blue: other accounts on the same key. Yellow: vault existence. Red: the attack each design
+choice mitigates (dotted edges).
 
 ```mermaid
 flowchart TD
-  U["Username (secret)"] -->|"Argon2id"| L["Lookup id"]
-  L -->|"encrypted record, or a stable decoy"| K["Security key + PIN"]
-  K -->|"touch 1: VAULT_SALT"| V["Vault login"]
-  V -->|"slot i + drive PIN"| K2["Security key touch 2: drive_salt(i, PIN)"]
-  K2 -->|"correct"| O["Drive opened"]
-  K2 -->|"wrong PIN or unused slot"| N["Same 'No drive found' error"]
-  S["Vault: 100 slots, all random from creation"] -.-> K2
+  subgraph flow["Account to drive flow"]
+    U["Username (secret)"] -->|"Argon2id, 64 MiB per guess"| L["Lookup id"]
+    L -->|"encrypted record, or a stable same-size decoy"| K["Security key + PIN<br/>non-discoverable credential, credProtect 3"]
+    K -->|"touch 1: VAULT_SALT → 256-bit PRF"| V["Vault login"]
+    V -->|"slot i + drive PIN"| K2["Security key touch 2: drive_salt(i, PIN)"]
+    K2 -->|"correct"| O["Drive opened<br/>commit wipes old metadata"]
+    K2 -->|"wrong PIN or unused slot"| N["Same 'No drive found' error"]
+    S["Vault: 100 slots, all random from creation"] -.-> K2
+    O --> B["Fixed-size sealed blocks<br/>names, tree, sizes inside encrypted metadata"]
+  end
+
+  subgraph online["Online attacker"]
+    T1["Probe which usernames exist"]
+  end
+  subgraph seized["Seized server only"]
+    T2["Offline brute force of the unlock secret"]
+    T3["Read file names, sizes, counts"]
+  end
+  subgraph coerced["Seized server + key + PIN"]
+    T4["Find other usernames on the key"]
+    T5["Prove hidden drives exist"]
+    T6["Brute-force drive PINs offline"]
+    T7["Recover deleted files with a coerced drive PIN"]
+  end
+  subgraph keyonly["Key + PIN only"]
+    T8["List accounts on the key"]
+  end
+
+  L -.->|mitigates| T1
+  K -.->|mitigates| T2
+  B -.->|mitigates| T3
+  U -.->|mitigates| T4
+  S -.->|mitigates| T5
+  N -.->|mitigates| T5
+  K2 -.->|mitigates| T6
+  O -.->|mitigates| T7
+  K -.->|mitigates| T8
 
   classDef account fill:#d1ecf1,stroke:#0c5460,color:#000
   classDef vault fill:#fff3cd,stroke:#b58900,color:#000
+  classDef threat fill:#f8d7da,stroke:#721c24,color:#000
   class L,K account
   class N,S vault
+  class T1,T2,T3,T4,T5,T6,T7,T8 threat
 ```
 
 - **Account existence:** not deniable. Registration reveals whether a username is taken, so anyone
