@@ -21,8 +21,14 @@ they are all the drives that exist, without the adversary being able to prove ot
 **What must hold:** given the above, the adversary cannot distinguish a vault where the user
 has created *k* drives from one where they have created *k + j* drives, for any *j* ≥ 0, and
 cannot open a drive without its drive PIN except by guessing it through the physical key.
-Likewise for usernames: the adversary cannot tell how many usernames (vaults) the key serves,
-nor find one without guessing its username.
+Likewise for usernames, under two threat models:
+
+- **Unprivileged adversary** (no usernames): cannot tell how many usernames (vaults) the key
+  serves, nor find one without guessing its username offline (one Argon2id run per guess).
+- **Hostile operator with the username list:** no guessing is needed. Each account costs one
+  Argon2id run and one touch on the key, so matching all accounts is linear in their number.
+  It is slow at scale but not infeasible, and the touch requirement does not change that. The
+  guarantee against this operator is only time, not secrecy.
 
 **Explicitly out of scope** (stated so nobody relies on them):
 

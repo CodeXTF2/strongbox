@@ -63,9 +63,16 @@ flowchart TD
 
 - **Account existence:** not deniable. Registration reveals whether a username is taken, so anyone
   who can try names can confirm that an account exists. Keep registration invite-only.
-- **Other accounts on the same key:** the deniable part. An unknown username gets a decoy record of
-  the same size, and the key stores nothing that lists accounts, so a seized key and PIN do not
-  show which other usernames it serves. Checking a guessed username means guessing it offline.
+- **Other accounts on the same key:** the deniable part, under two threat models.
+  - *Unprivileged attacker (brute-forcing usernames):* holds the server snapshot, the key and its PIN,
+    but not the usernames. The server stores no usernames, only Argon2id-derived lookup ids, and an
+    unknown username gets a decoy record of the same size. The credentials are non-discoverable, so the
+    key lists nothing. Matching the key means guessing usernames offline, one Argon2id computation per
+    guess, then testing each candidate credential on the key. A guessable username makes this quick.
+  - *Hostile operator with the username list:* holds the same material plus every username. There is
+    no guessing: each account costs one Argon2id run and one touch on the key. Matching all accounts
+    is linear in their number (about one touch each, so hours at thousands of accounts and days at a
+    million). It is slow but not infeasible, and the touch requirement does not change that.
 - **Vault existence:** a wrong drive PIN and an unused slot give the same result, message and
   timing, and every slot is filled with random bytes at creation, so used and unused slots look alike.
 
