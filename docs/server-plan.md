@@ -156,8 +156,9 @@ C and D deliver the resilience benefits with far less risk.
   hide or roll back whole subtrees, or fork two devices without detection.
 - **Session binding**: optional per-device keys, so stolen bearer tokens are useless.
 - **AMK rotation**: re-wrap keyslots, re-key directories lazily, rotate the auth key.
-- **Abuse handling**: the operator can see accounts and volumes but not content. Policy
-  can only act at account level (quotas, invites, payment). This is inherent to the design.
+- **Abuse handling**: users are responsible for their own content. Content moderation is
+  impossible from the operator side by design: the operator can see accounts and volumes but
+  not content, so policy can only act at account level (quotas, invites, payment).
 - Fuzz the commit and keyslot JSON parsers; get an external crypto/design audit before
   any public release.
 
