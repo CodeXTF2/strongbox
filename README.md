@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="apps/desktop/ui/logo.png" alt="Strongbox logo" width="160">
+</p>
+
 # Strongbox
 
 An end-to-end encrypted cloud drive unlocked by a FIDO2 security key (YubiKey etc.) and its PIN.
@@ -30,9 +34,6 @@ The comic below is a useful reminder that encryption cannot solve every part of 
 
 *Security, [xkcd #538](https://xkcd.com/538/) by Randall Munroe, used under
 [CC BY-NC 2.5](https://creativecommons.org/licenses/by-nc/2.5/).*
-
-Descended from [FidoVault](https://github.com/tmo1/fidovault): its multi-authenticator keyslot
-design became Strongbox's account key hierarchy.
 
 ## Layout
 
@@ -152,6 +153,11 @@ Early prototype. **Not audited.** Before relying on it:
 
 Always enroll at least two security keys, or a key plus the recovery code. Losing every
 unlock method means losing the data. Nobody, including the server operator, can recover it.
+
+## References
+
+- [FidoVault](https://github.com/tmo1/fidovault): a reference for Strongbox's multi-authenticator
+  keyslot design.
 
 ## License
 
