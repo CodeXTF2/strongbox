@@ -113,6 +113,11 @@
           <input id="search" type="search" placeholder="Search in this vault" spellcheck="false" autocomplete="off" aria-label="Search">
           <kbd class="search-kbd">Ctrl K</kbd>
         </div>
+        <div class="selection-bar" id="selection-bar" hidden>
+          <button class="icon-btn" id="sel-clear" title="Clear selection (Esc)" aria-label="Clear selection" data-icon="x"></button>
+          <span id="sel-count"></span>
+          <div class="selection-actions" id="sel-actions"></div>
+        </div>
         <div class="topbar-actions">
           <div class="segmented small" role="group" aria-label="Layout">
             <button type="button" id="view-list" title="List view" aria-label="List view" data-icon="list"></button>
@@ -125,11 +130,6 @@
         <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
         <div class="pathbar-actions" id="folder-actions">
           <button class="btn ghost sm" id="btn-refresh" title="Refresh (F5)" data-icon="refresh">Refresh</button>
-        </div>
-        <div class="selection-bar" id="selection-bar" hidden>
-          <button class="icon-btn" id="sel-clear" title="Clear selection (Esc)" aria-label="Clear selection" data-icon="x"></button>
-          <span id="sel-count"></span>
-          <div class="selection-actions" id="sel-actions"></div>
         </div>
       </div>
 

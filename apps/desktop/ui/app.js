@@ -118,6 +118,7 @@ function friendly(e) {
   if (/rate.?limit|slow down|too many requests/i.test(s)) return "Too many attempts. Wait a minute and try again.";
   if (/decryption failed/i.test(s)) return "That code or password doesn't match this account.";
   if (/^locked$/i.test(s)) return "Nothing is unlocked. Sign in first.";
+  if (/^no vault unlocked$/i.test(s)) return "No vault is unlocked. Unlock one from the sidebar first.";
   return s || "Something went wrong. Try again.";
 }
 
@@ -1376,6 +1377,7 @@ async function pickAndUpload(directory) {
 
 async function uploadPaths(paths, targetParts) {
   if (!paths.length || !state.unlocked) return;
+  if (!state.vaultTabs.length) { toast("No vault is unlocked. Unlock one from the sidebar first.", { type: "error" }); return; }
   const dir = pathStr(targetParts);
   // Ask once about name clashes with existing files in the target folder.
   let conflict = "keep_both";

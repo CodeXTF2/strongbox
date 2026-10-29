@@ -594,14 +594,14 @@ async fn current_vault(state: &AppState) -> Result<Arc<AsyncMutex<VaultSession>>
         .read()
         .await
         .clone()
-        .ok_or_else(|| "locked".to_string())?;
+        .ok_or_else(|| "no vault unlocked".to_string())?;
     state
         .vaults
         .read()
         .await
         .get(&active)
         .map(|item| item.session.clone())
-        .ok_or_else(|| "locked".to_string())
+        .ok_or_else(|| "no vault unlocked".to_string())
 }
 
 async fn current_vault_client(
