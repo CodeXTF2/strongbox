@@ -69,9 +69,7 @@ flowchart TD
     username. Matching the key means guessing usernames offline: for each candidate, one Argon2id
     run (64 MiB), decrypt the record to get its credential ids, then test them on the key (one
     touch). A candidate absent from the lookup table is discarded without touching the key. The
-    credentials are non-discoverable, so the key lists nothing. If the attacker already holds the
-    username list, no guessing is needed: each account costs one Argon2id run and one touch, which
-    is linear in the number of accounts. That is slow at scale but not infeasible.
+    credentials are non-discoverable, so the key lists nothing.
   - *Key and PIN only, no server access:* the attacker cannot match the key to any account. The
     credentials are non-discoverable, so the key lists nothing, and without the records there are
     no credential ids to test.
