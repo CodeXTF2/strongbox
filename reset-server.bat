@@ -13,7 +13,7 @@ echo WARNING: THIS PERMANENTLY DELETES THE STRONGBOX SERVER DATA
 echo ================================================================
 echo.
 echo This removes every account and vault, all files, the database,
-echo blobs, and the remembered vault layout in this data directory:
+echo vault files, and the remembered vault layout in this data directory:
 echo.
 echo   "%RESET_TARGET%"
 echo.

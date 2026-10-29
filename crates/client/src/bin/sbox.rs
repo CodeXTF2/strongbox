@@ -4,12 +4,9 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::bail;
 use clap::{Parser, Subcommand};
-use strongbox_client::{
-    local_safe_name, login, login_with_recovery, register, sign_in, sign_in_with_recovery, Drive,
-    Profile, RegisterOptions, Ui,
-};
+use strongbox_client::local_safe_name;
 use strongbox_fido::Interaction;
 
 #[derive(Parser)]
@@ -25,100 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create an account on a server, enrolling the connected security key.
-    Register {
-        #[arg(long)]
-        server: String,
-        #[arg(long)]
-        username: String,
-        #[arg(long)]
-        invite: Option<String>,
-        #[arg(long, default_value = "Security key 1")]
-        label: String,
-        /// Also require a password together with the security key.
-        #[arg(long)]
-        password: bool,
-        /// Skip creating a printable recovery code (not recommended).
-        #[arg(long)]
-        no_recovery: bool,
-        #[arg(long)]
-        rp_id: Option<String>,
-    },
-    /// Sign in on this device to an existing account (enrolled from another device).
-    Login {
-        #[arg(long)]
-        server: String,
-        #[arg(long)]
-        username: String,
-        /// Use the recovery code instead of a security key.
-        #[arg(long)]
-        recovery: bool,
-        #[arg(long)]
-        rp_id: Option<String>,
-    },
-    /// Unlock and show account usage.
-    Status,
-    Ls {
-        #[arg(default_value = "/")]
-        path: String,
-    },
-    /// Search file and folder names everywhere in the drive.
-    Find {
-        query: String,
-    },
-    Mkdir {
-        path: String,
-    },
-    /// Upload local files into a remote directory.
-    Put {
-        files: Vec<PathBuf>,
-        #[arg(long, default_value = "/")]
-        to: String,
-    },
-    /// Download a remote file.
-    Get {
-        remote: String,
-        local: Option<PathBuf>,
-    },
-    /// Delete a file or folder (moves it to the trash unless --permanent).
-    Rm {
-        path: String,
-        #[arg(long)]
-        permanent: bool,
-    },
-    Mv {
-        from: String,
-        to: String,
-    },
-    /// List, restore or empty the trash.
-    Trash {
-        #[command(subcommand)]
-        cmd: TrashCmd,
-    },
-    /// Manage security keys and recovery codes.
-    Keys {
-        #[command(subcommand)]
-        cmd: KeysCmd,
-    },
-    /// Remove unreferenced blobs left by interrupted uploads.
-    Gc,
-    /// Unlock once and run commands interactively.
-    Shell,
-    /// Unlock with a recovery code and enroll a replacement security key.
-    Recover {
-        #[arg(long, default_value = "Replacement key")]
-        label: String,
-    },
-    /// Deniable vaults (docs/deniable-drives.md). Nothing is saved on this computer.
-    Vault {
-        #[command(subcommand)]
-        cmd: VaultCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum VaultCmd {
-    /// Create a vault for the connected security key.
+    /// Create an account for the connected security key. Nothing is saved on this computer.
     Create {
         #[arg(long)]
         server: String,
@@ -129,7 +33,7 @@ enum VaultCmd {
     Open {
         #[arg(long)]
         server: String,
-        /// Slot number (0–99 on a default server).
+        /// Slot number (0-99 on a default server).
         slot: u32,
     },
     /// Open the drive a recovery code belongs to.
@@ -139,7 +43,7 @@ enum VaultCmd {
     },
 }
 
-/// Commands inside `sbox vault open`.
+/// Commands inside `sbox open`.
 #[derive(Parser)]
 #[command(name = "", no_binary_name = true)]
 enum VaultShellCmd {
@@ -175,34 +79,6 @@ enum VaultShellCmd {
     Exit,
 }
 
-#[derive(Subcommand)]
-enum KeysCmd {
-    List,
-    /// Enroll an additional security key.
-    Add {
-        #[arg(long, default_value = "Security key")]
-        label: String,
-        #[arg(long)]
-        password: bool,
-    },
-    /// Generate a new recovery code.
-    Recovery,
-    Remove {
-        id: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum TrashCmd {
-    List,
-    /// Restore an item by the id shown in `trash list`.
-    Restore {
-        id: String,
-    },
-    /// Permanently delete everything in the trash.
-    Empty,
-}
-
 struct CliUi;
 
 impl Interaction for CliUi {
@@ -218,30 +94,8 @@ impl Interaction for CliUi {
     }
 }
 
-impl Ui for CliUi {
-    fn request_password(&self) -> Option<String> {
-        rpassword::prompt_password("Password: ").ok()
-    }
-}
-
-fn ask_new_password() -> anyhow::Result<String> {
-    let a = rpassword::prompt_password("New password: ")?;
-    if a != rpassword::prompt_password("Confirm password: ")? {
-        bail!("passwords do not match");
-    }
-    Ok(a)
-}
-
 fn authenticator() -> Arc<dyn strongbox_fido::Authenticator> {
     strongbox_fido::platform(Arc::new(CliUi)).into()
-}
-
-fn profile() -> anyhow::Result<Profile> {
-    Profile::load()?.context("no account configured; run `sbox register` first")
-}
-
-async fn unlock() -> anyhow::Result<Drive> {
-    Ok(login(profile()?, authenticator(), Arc::new(CliUi)).await?)
 }
 
 fn show_recovery(code: &str) {
@@ -274,123 +128,6 @@ fn progress(done: u64, total: u64) {
     }
 }
 
-async fn run_drive_cmd(drive: &Drive, cmd: Cmd) -> anyhow::Result<()> {
-    match cmd {
-        Cmd::Status => {
-            let u = drive.usage().await?;
-            let p = drive.profile();
-            println!("{}@{}", p.username, p.server_url);
-            println!(
-                "used: {} (padded){}",
-                human(u.used_bytes),
-                u.quota_bytes
-                    .map(|q| format!(" of {}", human(q)))
-                    .unwrap_or_default()
-            );
-        }
-        Cmd::Ls { path } => {
-            for e in drive.list(&path).await? {
-                let size = if e.is_dir {
-                    "-".to_string()
-                } else {
-                    human(e.size)
-                };
-                let name = if e.is_dir {
-                    format!("{}/", e.name)
-                } else {
-                    e.name
-                };
-                println!("{size:>10}  {name}");
-            }
-        }
-        Cmd::Find { query } => {
-            for h in drive.search(&query).await? {
-                println!("{}{}", h.path, if h.entry.is_dir { "/" } else { "" });
-            }
-        }
-        Cmd::Mkdir { path } => drive.mkdir(&path).await?,
-        Cmd::Put { files, to } => {
-            for f in files {
-                eprintln!("{}", f.display());
-                drive.upload(&f, &to, Some(&progress)).await?;
-            }
-        }
-        Cmd::Get { remote, local } => {
-            // The remote name is not trusted as a path: it could contain `..\` on Windows.
-            let local = local.unwrap_or_else(|| {
-                PathBuf::from(local_safe_name(
-                    remote.rsplit('/').next().unwrap_or("download"),
-                ))
-            });
-            drive.download(&remote, &local, Some(&progress)).await?;
-            eprintln!("saved {}", local.display());
-        }
-        Cmd::Rm {
-            path,
-            permanent: true,
-        } => drive.remove(&path).await?,
-        Cmd::Rm {
-            path,
-            permanent: false,
-        } => {
-            drive.trash(&path).await?;
-        }
-        Cmd::Mv { from, to } => drive.rename(&from, &to).await?,
-        Cmd::Trash { cmd } => match cmd {
-            TrashCmd::List => {
-                for t in drive.list_trash().await? {
-                    let p = if t.parent == "/" {
-                        format!("/{}", t.name)
-                    } else {
-                        format!("{}/{}", t.parent, t.name)
-                    };
-                    println!("{}  {}{}", t.id, p, if t.is_dir { "/" } else { "" });
-                }
-            }
-            TrashCmd::Restore { id } => eprintln!("restored to {}", drive.restore(&id).await?),
-            TrashCmd::Empty => {
-                eprintln!("permanently deleted {} items", drive.empty_trash().await?)
-            }
-        },
-        Cmd::Keys { cmd } => match cmd {
-            KeysCmd::List => {
-                for s in drive.keyslots().await? {
-                    let kind = match &s.kind {
-                        strongbox_core::keyslot::KeyslotKind::Fido {
-                            password: Some(_), ..
-                        } => "security key + password",
-                        strongbox_core::keyslot::KeyslotKind::Fido { .. } => "security key",
-                        strongbox_core::keyslot::KeyslotKind::Recovery => "recovery code",
-                    };
-                    println!("{}  {:<24} {}", s.id, kind, s.label);
-                }
-            }
-            KeysCmd::Add { label, password } => {
-                let pw = if password {
-                    Some(ask_new_password()?)
-                } else {
-                    None
-                };
-                eprintln!("Insert the NEW security key (you will be asked to touch it twice)");
-                let slot = drive.add_security_key(authenticator(), label, pw).await?;
-                eprintln!("added keyslot {}", slot.id);
-            }
-            KeysCmd::Recovery => show_recovery(&drive.add_recovery_code().await?),
-            KeysCmd::Remove { id } => drive.remove_keyslot(&id.parse()?).await?,
-        },
-        Cmd::Gc => eprintln!("removed {} orphaned blobs", drive.collect_garbage().await?),
-        Cmd::Register { .. }
-        | Cmd::Login { .. }
-        | Cmd::Shell
-        | Cmd::Recover { .. }
-        | Cmd::Vault { .. } => {
-            bail!("not available here")
-        }
-    }
-    Ok(())
-}
-
-/// Split a line into words, honouring double quotes.
 fn split_words(line: &str) -> Vec<String> {
     let (mut words, mut cur, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
     for c in line.chars() {
@@ -417,39 +154,6 @@ fn split_words(line: &str) -> Vec<String> {
     words
 }
 
-async fn shell(drive: Drive) -> anyhow::Result<()> {
-    eprintln!(
-        "Unlocked. Commands: ls, find, mkdir, put, get, rm, mv, trash, keys, status, gc, exit"
-    );
-    let stdin = std::io::stdin();
-    loop {
-        eprint!("sbox> ");
-        std::io::stderr().flush()?;
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            break;
-        }
-        let mut words = split_words(&line);
-        if words.is_empty() {
-            continue;
-        }
-        if matches!(words[0].as_str(), "exit" | "quit") {
-            break;
-        }
-        words.insert(0, "sbox".into());
-        match Cli::try_parse_from(words) {
-            Ok(Cli { cmd }) => {
-                if let Err(e) = run_drive_cmd(&drive, cmd).await {
-                    eprintln!("error: {e}");
-                }
-            }
-            Err(e) => eprintln!("{e}"),
-        }
-    }
-    drive.logout().await?;
-    Ok(())
-}
-
 /// Vault usernames are secrets (they locate the account), so they are typed hidden and never
 /// taken from the command line, where they would end up in shell history.
 fn ask_vault_username(new: bool) -> anyhow::Result<String> {
@@ -457,7 +161,7 @@ fn ask_vault_username(new: bool) -> anyhow::Result<String> {
         eprintln!("Choose a username nobody could guess (it works like a password: anyone who has");
         eprintln!("your key and its PIN can only find this account by guessing its username).");
     }
-    let u = rpassword::prompt_password("Vault username: ")?;
+    let u = rpassword::prompt_password("Username: ")?;
     if new && rpassword::prompt_password("Repeat username: ")? != u {
         bail!("usernames do not match");
     }
@@ -476,21 +180,21 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-async fn vault(cmd: VaultCmd) -> anyhow::Result<()> {
+async fn run(cmd: Cmd) -> anyhow::Result<()> {
     use strongbox_client::vault;
     match cmd {
-        VaultCmd::Create { server, invite } => {
+        Cmd::Create { server, invite } => {
             let username = ask_vault_username(true)?;
             eprintln!("Insert the security key. You will enter its PIN and touch it twice.");
             let v = vault::create_vault(&server, &username, invite, authenticator()).await?;
             eprintln!(
-                "Vault created with {} drive slots. Open one with `sbox vault open --server {server} <slot>`;\n\
+                "Account created with {} drive slots. Open one with `sbox open --server {server} <slot>`;\n\
                  choose a drive PIN of at least 8 characters (10+ digits or a passphrase recommended).",
                 v.layout().slots
             );
             v.logout().await?;
         }
-        VaultCmd::Open { server, slot } => {
+        Cmd::Open { server, slot } => {
             let username = ask_vault_username(false)?;
             let pin = ask_drive_pin(&format!("Drive PIN for slot {slot}: "))?;
             eprintln!("Insert your security key, enter its PIN and touch it.");
@@ -513,7 +217,7 @@ async fn vault(cmd: VaultCmd) -> anyhow::Result<()> {
             vault_shell(drive).await?;
             v.logout().await?;
         }
-        VaultCmd::Recover { server } => {
+        Cmd::Recover { server } => {
             let username = ask_vault_username(false)?;
             let code = rpassword::prompt_password("Recovery code: ")?;
             let (v, key) = vault::connect_with_recovery(&server, &username, &code).await?;
@@ -606,79 +310,5 @@ async fn vault_shell(mut drive: strongbox_client::vault::VaultDrive) -> anyhow::
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    match cli.cmd {
-        Cmd::Register {
-            server,
-            username,
-            invite,
-            label,
-            password,
-            no_recovery,
-            rp_id,
-        } => {
-            if Profile::load()?.is_some() {
-                eprintln!("note: replacing the existing local profile");
-            }
-            let password = if password {
-                Some(ask_new_password()?)
-            } else {
-                None
-            };
-            eprintln!(
-                "Insert your security key. You will be asked for its PIN and to touch it twice."
-            );
-            let opts = RegisterOptions {
-                server_url: server,
-                username,
-                invite,
-                key_label: label,
-                password,
-                recovery_code: !no_recovery,
-                rp_id,
-            };
-            let (drive, code) = register(opts, authenticator()).await?;
-            if let Some(code) = code {
-                show_recovery(&code);
-            }
-            eprintln!("Account created. Add a backup security key soon: `sbox keys add`.");
-            drive.logout().await?;
-        }
-        Cmd::Login {
-            server,
-            username,
-            recovery,
-            rp_id,
-        } => {
-            let drive = if recovery {
-                let code = rpassword::prompt_password("Recovery code: ")?;
-                sign_in_with_recovery(&server, &username, &code).await?
-            } else {
-                eprintln!("Insert your security key, enter its PIN and touch it.");
-                sign_in(&server, &username, rp_id, authenticator(), Arc::new(CliUi)).await?
-            };
-            eprintln!("Signed in as {username}. This device will now unlock this account.");
-            drive.logout().await?;
-        }
-        Cmd::Shell => shell(unlock().await?).await?,
-        Cmd::Vault { cmd } => vault(cmd).await?,
-        Cmd::Recover { label } => {
-            let code = rpassword::prompt_password("Recovery code: ")?;
-            let drive = login_with_recovery(profile()?, &code).await?;
-            eprintln!("Unlocked with recovery code. Insert the replacement security key.");
-            let slot = drive.add_security_key(authenticator(), label, None).await?;
-            eprintln!(
-                "added keyslot {}; consider rotating your recovery code (`sbox keys recovery`)",
-                slot.id
-            );
-            drive.logout().await?;
-        }
-        cmd => {
-            let drive = unlock().await?;
-            let r = run_drive_cmd(&drive, cmd).await;
-            drive.logout().await?;
-            r?;
-        }
-    }
-    Ok(())
+    run(Cli::parse().cmd).await
 }

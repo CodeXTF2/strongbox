@@ -1,7 +1,6 @@
 //! CTAP2 over USB HID (Linux, macOS, BSDs) via Mozilla's `authenticator` crate, the FIDO stack
 //! used by Firefox. PIN entry goes through [`Interaction::request_pin`].
 
-use std::collections::HashMap;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread;
@@ -22,9 +21,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::{
-    client_data_json, Authenticator, CredentialSalt, Error, Interaction, PrfOutput, PrfPair, Result,
-};
+use crate::{client_data_json, Authenticator, Error, Interaction, PrfPair, Result};
 
 const TIMEOUT_MS: u64 = 120_000;
 
@@ -103,37 +100,6 @@ impl Authenticator for CtapAuthenticator {
 
     fn enroll(&self, rp_id: &str, user_name: &str, exclude: &[Vec<u8>]) -> Result<Vec<u8>> {
         self.register_credential(rp_id, user_name, exclude)
-    }
-
-    fn prf(&self, rp_id: &str, creds: &[CredentialSalt]) -> Result<PrfOutput> {
-        let eval_by_credential: HashMap<Vec<u8>, AuthenticationExtensionsPRFValues> = creds
-            .iter()
-            .map(|c| {
-                (
-                    c.credential_id.clone(),
-                    AuthenticationExtensionsPRFValues {
-                        first: c.prf_salt.clone(),
-                        second: None,
-                    },
-                )
-            })
-            .collect();
-        let allow = creds.iter().map(|c| c.credential_id.clone()).collect();
-        let prf = AuthenticationExtensionsPRFInputs {
-            eval: None,
-            eval_by_credential: Some(eval_by_credential),
-        };
-        let mut p = self.sign(rp_id, allow, prf)?;
-        if p.credential_id.is_empty() && creds.len() == 1 {
-            p.credential_id = creds[0].credential_id.clone();
-        }
-        if p.credential_id.is_empty() {
-            return Err(Error::UnknownCredential);
-        }
-        Ok(PrfOutput {
-            credential_id: p.credential_id,
-            output: p.first,
-        })
     }
 
     fn prf2(

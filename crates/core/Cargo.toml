@@ -1,6 +1,6 @@
 [package]
 name = "strongbox-core"
-description = "Strongbox client-side cryptography: key hierarchy, keyslots, encrypted nodes and content"
+description = "Strongbox client-side cryptography: AEAD and key derivation, recovery codes, vault and drive formats"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

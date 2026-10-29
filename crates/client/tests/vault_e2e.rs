@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use strongbox_client::vault::{connect, connect_with_recovery, create_vault};
+use strongbox_client::vault::{connect, connect_account, connect_with_recovery, create_vault};
 use strongbox_client::{Error, OnConflict, TransferOptions};
 use strongbox_fido::soft::SoftAuthenticator;
 use strongbox_fido::Authenticator;
@@ -19,7 +19,6 @@ async fn start_server(data_dir: &Path) -> String {
         data_dir: data_dir.to_path_buf(),
         registration: RegistrationMode::Invite,
         invite_token: Some("letmein".into()),
-        quota_bytes: None,
         session_ttl_secs: 3600,
         prelogin_rate_per_minute: 1000,
         trust_proxy: false,
@@ -27,8 +26,6 @@ async fn start_server(data_dir: &Path) -> String {
         vault_slots: Some(SLOTS),
         vault_slot_blocks: Some(BLOCKS),
         drive_size: None,
-        max_blob_size: 8 * 1024 * 1024,
-        max_node_size: 16 * 1024 * 1024,
     };
     let app = strongbox_server::build(config).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -318,4 +315,212 @@ async fn deniable_vault() {
         .await
         .is_err());
     assert!(d.list("/").unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_account_removes_everything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server_dir = tmp.path().join("server");
+    let url = start_server(&server_dir).await;
+    let key: Arc<dyn Authenticator> =
+        Arc::new(SoftAuthenticator::new(tmp.path().join("key1.json")));
+    const USER: &str = "doomed-account-name";
+
+    let account = create_vault(&url, USER, Some("letmein".into()), key.clone())
+        .await
+        .unwrap();
+    let (client, k) = connect(&url, USER, key.clone(), 0, "12345678")
+        .await
+        .unwrap();
+    client.create(&k).await.unwrap();
+    client.delete_account().await.unwrap();
+
+    // The session is gone, and so is the account: it can't sign in or be created over again.
+    assert!(account.members().await.is_err());
+    assert!(connect_account(&url, USER, key.clone()).await.is_err());
+    assert!(connect(&url, USER, key.clone(), 0, "12345678")
+        .await
+        .is_err());
+    assert!(std::fs::read_dir(server_dir.join("vaults"))
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_vault_storage_is_a_clean_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server_dir = tmp.path().join("server");
+    let url = start_server(&server_dir).await;
+    let key: Arc<dyn Authenticator> =
+        Arc::new(SoftAuthenticator::new(tmp.path().join("key1.json")));
+    const USER: &str = "orphaned-account-name";
+
+    create_vault(&url, USER, Some("letmein".into()), key.clone())
+        .await
+        .unwrap();
+    // The operator deletes the vault files (to reclaim disk space) but not the database.
+    for entry in std::fs::read_dir(server_dir.join("vaults")).unwrap() {
+        std::fs::remove_dir_all(entry.unwrap().path()).unwrap();
+    }
+
+    // Signing in still works; opening a drive says the storage is missing instead of a 500.
+    let (client, k) = connect(&url, USER, key.clone(), 0, "12345678")
+        .await
+        .unwrap();
+    match client.open(&k).await {
+        Err(Error::Api {
+            status: 404,
+            message,
+            ..
+        }) => assert!(message.contains("storage"), "{message}"),
+        other => panic!("expected a 404, got {:?}", other.map(|_| ())),
+    }
+    assert!(matches!(
+        client.create(&k).await,
+        Err(Error::Api { status: 404, .. })
+    ));
+    // The account can still be deleted, so its owner can start over with the same username.
+    client.delete_account().await.unwrap();
+    create_vault(&url, USER, Some("letmein".into()), key.clone())
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn change_pin_and_rename_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let url = start_server(&tmp.path().join("server")).await;
+    let key: Arc<dyn Authenticator> =
+        Arc::new(SoftAuthenticator::new(tmp.path().join("key1.json")));
+    let backup: Arc<dyn Authenticator> =
+        Arc::new(SoftAuthenticator::new(tmp.path().join("key2.json")));
+    const USER: &str = "pin-change-user";
+    const OLD: &str = "old-drive-pin";
+    const NEW: &str = "new-drive-pin";
+    create_vault(&url, USER, Some("letmein".into()), key.clone())
+        .await
+        .unwrap();
+    let (vault, k) = connect(&url, USER, key.clone(), 1, OLD).await.unwrap();
+    let mut drive = vault.create(&k).await.unwrap();
+    drive.mkdir("/kept").await.unwrap();
+    let code = drive.new_recovery_code().await.unwrap();
+    drive
+        .add_key_named(backup.clone(), OLD, "Backup")
+        .await
+        .unwrap();
+
+    // The PIN must be a valid one, and a recovery-code session cannot change it.
+    assert!(drive.change_pin(key.clone(), "short").await.is_err());
+    let (rv, rk) = connect_with_recovery(&url, USER, &code).await.unwrap();
+    let mut by_code = rv.open(&rk).await.unwrap().unwrap();
+    assert!(by_code.change_pin(key.clone(), NEW).await.is_err());
+
+    // The key that opened the drive changes the PIN; the backup key (old PIN) loses access.
+    assert_eq!(drive.change_pin(key.clone(), NEW).await.unwrap(), 1);
+    let (v2, k2) = connect(&url, USER, key.clone(), 1, NEW).await.unwrap();
+    let d2 = v2.open(&k2).await.unwrap().expect("opens with the new PIN");
+    assert_eq!(d2.list("/").unwrap()[0].name, "kept");
+    let old = v2.slot_key(key.clone(), 1, OLD).await.unwrap();
+    assert!(v2.open(&old).await.unwrap().is_none(), "old PIN is dead");
+    let stale = v2.slot_key(backup.clone(), 1, OLD).await.unwrap();
+    assert!(
+        v2.open(&stale).await.unwrap().is_none(),
+        "backup key lost access"
+    );
+    let fresh = v2.slot_key(backup.clone(), 1, NEW).await.unwrap();
+    assert!(
+        v2.open(&fresh).await.unwrap().is_none(),
+        "backup was not re-granted"
+    );
+    // The recovery code still opens it.
+    let (rv, rk) = connect_with_recovery(&url, USER, &code).await.unwrap();
+    assert!(rv.open(&rk).await.unwrap().is_some());
+
+    // Keys and recovery codes can be renamed; the new names survive a fresh login.
+    let labels = v2.member_labels();
+    let backup_id = labels
+        .iter()
+        .find(|m| m.label == "Backup")
+        .unwrap()
+        .id
+        .clone();
+    v2.rename_member(&backup_id, "  Safe deposit key ")
+        .await
+        .unwrap();
+    assert!(v2.rename_member(&backup_id, "   ").await.is_err());
+    assert!(v2.rename_member(&backup_id, &"x".repeat(81)).await.is_err());
+    assert!(v2.rename_member("nope", "x").await.is_err());
+    let (v3, _) = connect(&url, USER, key.clone(), 1, NEW).await.unwrap();
+    assert!(v3
+        .member_labels()
+        .iter()
+        .any(|m| m.id == backup_id && m.label == "Safe deposit key"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn key_and_recovery_names_are_unique() {
+    let tmp = tempfile::tempdir().unwrap();
+    let url = start_server(&tmp.path().join("server")).await;
+    let key: Arc<dyn Authenticator> =
+        Arc::new(SoftAuthenticator::new(tmp.path().join("key1.json")));
+    let backup: Arc<dyn Authenticator> =
+        Arc::new(SoftAuthenticator::new(tmp.path().join("key2.json")));
+    const USER: &str = "unique-names-user";
+    create_vault(&url, USER, Some("letmein".into()), key.clone())
+        .await
+        .unwrap();
+    let (vault, k) = connect(&url, USER, key.clone(), 0, "drive-pin-0")
+        .await
+        .unwrap();
+    let mut drive = vault.create(&k).await.unwrap();
+
+    // The first key is "Security key 1", so the next suggestion is "Security key 2".
+    assert_eq!(vault.suggest_label("Security key 1", &[]), "Security key 2");
+    assert_eq!(vault.suggest_label("Backup key", &[]), "Backup key");
+    drive
+        .new_recovery_code_named("Recovery code")
+        .await
+        .unwrap();
+    assert_eq!(vault.suggest_label("Recovery code", &[]), "Recovery code 2");
+    // Replacing this drive's code may reuse its name.
+    assert_eq!(
+        vault.suggest_label("Recovery code", &drive.recovery_ids()),
+        "Recovery code"
+    );
+    drive
+        .new_recovery_code_named("Recovery code")
+        .await
+        .unwrap();
+
+    // Duplicates (ignoring case and spaces) are refused for keys, recovery codes and renames,
+    // before any key is touched.
+    for name in ["Security key 1", "  security KEY 1 ", "recovery code"] {
+        assert!(drive
+            .add_key_named(backup.clone(), "drive-pin-0", name)
+            .await
+            .is_err());
+        assert!(vault
+            .add_account_key_named(backup.clone(), name)
+            .await
+            .is_err());
+        assert!(vault.new_account_recovery_code_named(name).await.is_err());
+        assert!(drive
+            .new_recovery_code_named("Security key 1")
+            .await
+            .is_err());
+    }
+    drive
+        .add_key_named(backup.clone(), "drive-pin-0", "Security key 2")
+        .await
+        .unwrap();
+    let ids: Vec<_> = vault.member_labels().into_iter().map(|m| m.id).collect();
+    assert!(vault
+        .rename_member(&ids[0], "security key 2")
+        .await
+        .is_err());
+    vault
+        .rename_member(&ids[0], "SECURITY KEY 1")
+        .await
+        .unwrap(); // own name, new case
+    assert_eq!(vault.member_labels().len(), 3);
 }

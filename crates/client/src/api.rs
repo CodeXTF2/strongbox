@@ -1,10 +1,8 @@
-//! Thin typed wrapper over the `/v1` HTTP API.
+//! Thin typed wrapper over the `/v1/info` and `/v2` HTTP API.
 
-use reqwest::{Method, RequestBuilder, Response, StatusCode};
+use reqwest::{Method, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use strongbox_core::keyslot::Keyslot;
-use strongbox_core::Id;
 use strongbox_proto::*;
 use zeroize::Zeroizing;
 
@@ -81,13 +79,6 @@ impl Api {
         }
         let body = resp.text().await.unwrap_or_default();
         match serde_json::from_str::<ApiError>(&body) {
-            Ok(e)
-                if status == StatusCode::CONFLICT
-                    && e.code == ErrorCode::Conflict
-                    && !e.conflicts.is_empty() =>
-            {
-                Err(Error::Conflict(e.conflicts))
-            }
             Ok(e) => Err(Error::Api {
                 status: status.as_u16(),
                 code: Some(e.code),
@@ -113,165 +104,11 @@ impl Api {
         self.json(self.req(Method::GET, "/v1/info")).await
     }
 
-    pub async fn register(&self, req: &RegisterRequest) -> Result<()> {
-        Self::check(
-            self.req(Method::POST, "/v1/accounts")
-                .json(req)
-                .send()
-                .await?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn keyslots(&self, username: &str) -> Result<Vec<Keyslot>> {
-        // The username becomes a URL path segment: allow only what the server accepts.
-        if !username
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
-        {
-            return Err(Error::Invalid(
-                "username must be 3-64 chars of a-z 0-9 . _ -".into(),
-            ));
-        }
-        let r: KeyslotsResponse = self
-            .json(self.req(Method::GET, &format!("/v1/accounts/{username}/keyslots")))
-            .await?;
-        Ok(r.keyslots)
-    }
-
-    pub async fn challenge(&self, username: &str) -> Result<Vec<u8>> {
-        let r: ChallengeResponse = self
-            .post(
-                "/v1/auth/challenge",
-                &ChallengeRequest {
-                    username: username.into(),
-                },
-            )
-            .await?;
-        Ok(r.challenge)
-    }
-
-    pub async fn session(&self, req: &SessionRequest) -> Result<SessionResponse> {
-        self.post("/v1/auth/session", req).await
-    }
-
-    pub async fn logout(&self) -> Result<()> {
-        Self::check(self.req(Method::DELETE, "/v1/auth/session").send().await?).await?;
-        Ok(())
-    }
-
     /// Permanently delete the signed-in account on the server.
     pub async fn delete_account(&self) -> Result<()> {
-        Self::check(self.req(Method::DELETE, "/v1/accounts").send().await?).await?;
+        Self::check(self.req(Method::DELETE, "/v2/vaults").send().await?).await?;
         Ok(())
     }
-
-    pub async fn put_keyslot(&self, slot: &Keyslot) -> Result<()> {
-        Self::check(
-            self.req(Method::PUT, &format!("/v1/keyslots/{}", slot.id))
-                .json(slot)
-                .send()
-                .await?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn delete_keyslot(&self, id: &Id) -> Result<()> {
-        Self::check(
-            self.req(Method::DELETE, &format!("/v1/keyslots/{id}"))
-                .send()
-                .await?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// `Ok(None)` if the node does not exist (or was deleted).
-    pub async fn get_node(&self, id: &Id) -> Result<Option<(u64, Vec<u8>)>> {
-        let resp = self
-            .req(Method::GET, &format!("/v1/nodes/{id}"))
-            .send()
-            .await?;
-        if resp.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let resp = Self::check(resp).await?;
-        let version = resp
-            .headers()
-            .get(NODE_VERSION_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| Error::Invalid("missing node version header".into()))?;
-        Ok(Some((version, resp.bytes().await?.to_vec())))
-    }
-
-    pub async fn changes(&self, since: u64) -> Result<ChangesResponse> {
-        self.json(self.req(Method::GET, &format!("/v1/changes?since={since}")))
-            .await
-    }
-
-    pub async fn commit(&self, req: &CommitRequest) -> Result<CommitResponse> {
-        self.post("/v1/commit", req).await
-    }
-
-    pub async fn put_blob(&self, id: &Id, data: Vec<u8>) -> Result<()> {
-        Self::check(
-            self.req(Method::PUT, &format!("/v1/blobs/{id}"))
-                .body(data)
-                .send()
-                .await?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Fetch a blob, refusing bodies over `max_len` (the server is not trusted to bound them).
-    pub async fn get_blob(&self, id: &Id, max_len: usize) -> Result<Vec<u8>> {
-        let mut resp = Self::check(
-            self.req(Method::GET, &format!("/v1/blobs/{id}"))
-                .send()
-                .await?,
-        )
-        .await?;
-        let too_big = || Error::Invalid(format!("server returned an oversized blob {id}"));
-        if resp.content_length().is_some_and(|n| n > max_len as u64) {
-            return Err(too_big());
-        }
-        let mut out = Vec::new();
-        while let Some(part) = resp.chunk().await? {
-            if out.len() + part.len() > max_len {
-                return Err(too_big());
-            }
-            out.extend_from_slice(&part);
-        }
-        Ok(out)
-    }
-
-    pub async fn delete_blob(&self, id: &Id) -> Result<()> {
-        Self::check(
-            self.req(Method::DELETE, &format!("/v1/blobs/{id}"))
-                .send()
-                .await?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn list_blobs(&self, after: Option<&Id>) -> Result<BlobListResponse> {
-        let path = match after {
-            Some(a) => format!("/v1/blobs?after={a}"),
-            None => "/v1/blobs".to_string(),
-        };
-        self.json(self.req(Method::GET, &path)).await
-    }
-
-    pub async fn usage(&self) -> Result<UsageResponse> {
-        self.json(self.req(Method::GET, "/v1/usage")).await
-    }
-
-    // ---------------- /v2 deniable vaults
 
     pub async fn create_vault(&self, req: &CreateVaultRequest) -> Result<VaultLayout> {
         self.post("/v2/vaults", req).await

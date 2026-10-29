@@ -50,3 +50,16 @@ zeroize = { version = "1.8.1", features = ["derive"] }
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Keep target/ from ballooning: full debug info (PDBs on Windows) is the bulk of
+# the size, and every rebuild leaves the previous copy behind.
+[profile.dev]
+debug = "line-tables-only"   # backtraces still have file:line; no variable info
+incremental = false          # incremental caches grow with every edit and are never pruned
+
+[profile.dev.package."*"]
+debug = 0                    # no debug info for third-party dependencies
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false

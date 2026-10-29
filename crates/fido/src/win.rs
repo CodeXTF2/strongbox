@@ -11,10 +11,7 @@ use windows::Win32::Networking::WindowsWebServices::*;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use zeroize::Zeroizing;
 
-use crate::{
-    auth_data_has_uv, client_data_json, Authenticator, CredentialSalt, Error, PrfOutput, PrfPair,
-    Result,
-};
+use crate::{auth_data_has_uv, client_data_json, Authenticator, Error, PrfPair, Result};
 
 const TIMEOUT_MS: u32 = 120_000;
 const MIN_API_VERSION: u32 = 4;
@@ -74,41 +71,6 @@ impl Authenticator for WindowsAuthenticator {
 
     fn enroll(&self, rp_id: &str, user_name: &str, exclude: &[Vec<u8>]) -> Result<Vec<u8>> {
         self.make_credential(rp_id, user_name, exclude)
-    }
-
-    fn prf(&self, rp_id: &str, creds: &[CredentialSalt]) -> Result<PrfOutput> {
-        // PRF inputs per credential (evalByCredential); Windows hashes them into hmac-secret
-        // salts per the WebAuthn spec because WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG is
-        // not set.
-        let mut salts: Vec<WEBAUTHN_HMAC_SECRET_SALT> = creds
-            .iter()
-            .map(|c| WEBAUTHN_HMAC_SECRET_SALT {
-                cbFirst: c.prf_salt.len() as u32,
-                pbFirst: c.prf_salt.as_ptr() as *mut u8,
-                cbSecond: 0,
-                pbSecond: std::ptr::null_mut(),
-            })
-            .collect();
-        let mut by_cred: Vec<WEBAUTHN_CRED_WITH_HMAC_SECRET_SALT> = creds
-            .iter()
-            .zip(salts.iter_mut())
-            .map(|(c, s)| WEBAUTHN_CRED_WITH_HMAC_SECRET_SALT {
-                cbCredID: c.credential_id.len() as u32,
-                pbCredID: c.credential_id.as_ptr() as *mut u8,
-                pHmacSecretSalt: s,
-            })
-            .collect();
-        let mut salt_values = WEBAUTHN_HMAC_SECRET_SALT_VALUES {
-            pGlobalHmacSalt: std::ptr::null_mut(),
-            cCredWithHmacSecretSaltList: by_cred.len() as u32,
-            pCredWithHmacSecretSaltList: by_cred.as_mut_ptr(),
-        };
-        let allow: Vec<&[u8]> = creds.iter().map(|c| c.credential_id.as_slice()).collect();
-        let p = self.assertion(rp_id, &allow, &mut salt_values)?;
-        Ok(PrfOutput {
-            credential_id: p.credential_id,
-            output: p.first,
-        })
     }
 
     fn prf2(

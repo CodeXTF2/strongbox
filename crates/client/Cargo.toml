@@ -18,7 +18,6 @@ strongbox-proto.workspace = true
 strongbox-fido.workspace = true
 anyhow.workspace = true
 clap.workspace = true
-dirs = "5.0.1"
 reqwest.workspace = true
 rpassword.workspace = true
 serde.workspace = true

@@ -1,4 +1,4 @@
-use strongbox_proto::{ErrorCode, NodeVersion};
+use strongbox_proto::ErrorCode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -8,18 +8,12 @@ pub enum Error {
         code: Option<ErrorCode>,
         message: String,
     },
-    #[error("version conflict")]
-    Conflict(Vec<NodeVersion>),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("{0} already exists")]
     Exists(String),
     #[error("{0}")]
     Invalid(String),
-    #[error("possible rollback attack: the server returned version {got} of a node already seen at version {seen}")]
-    Rollback { seen: u64, got: u64 },
-    #[error("server identity changed (expected {expected}, got {got}); refusing to continue")]
-    ServerChanged { expected: String, got: String },
     #[error("cryptography: {0}")]
     Crypto(#[from] strongbox_core::Error),
     #[error("security key: {0}")]

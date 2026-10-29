@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Strongbox</title>
+  <link rel="icon" type="image/png" href="logo.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <!-- ============ Sign in / create account ============ -->
   <section id="view-auth" class="auth-view" hidden>
     <div class="auth-panel">
-      <div class="brand"><span class="logo" aria-hidden="true"></span><span>Strongbox</span></div>
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span class="wordmark" aria-label="Strongbox">Strong<b>box</b></span></div>
 
       <div class="segmented" role="tablist" aria-label="Account">
         <button type="button" role="tab" id="tab-signin" aria-selected="true">Sign in</button>
@@ -28,16 +29,25 @@
         <label class="field">Username
           <input name="username" type="password" required autocomplete="off" spellcheck="false" autocapitalize="off">
         </label>
+        <div class="stack" id="recovery-block" hidden>
+          <div class="segmented" id="code-kind" role="group" aria-label="Recovery code type">
+            <button type="button" data-kind="account" aria-pressed="true">Account code</button>
+            <button type="button" data-kind="vault" aria-pressed="false">Vault code</button>
+          </div>
+          <label class="field">Recovery code
+            <input name="code" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="XXXX-XXXX-…">
+            <span class="hint" id="code-hint"></span>
+          </label>
+        </div>
         <p class="form-error" hidden></p>
-        <button class="btn primary lg" type="submit" data-icon="key">Sign in</button>
-        <button class="btn link" type="button" id="btn-signin-account-recovery">Sign in with an account recovery code...</button>
-        <button class="btn link" type="button" id="vault-recover">Open a vault with its recovery code...</button>
+        <button class="btn primary lg" type="submit" data-icon="key" id="signin-submit">Sign in with security key</button>
+        <button class="btn link" type="button" id="btn-signin-mode">Use a recovery code instead</button>
       </form>
 
       <form id="setup-form" class="stack" autocomplete="off" novalidate hidden>
         <div>
           <h1>Create account</h1>
-          <p class="muted">Create your account and sign-in key. You can create or unlock vaults after signing in.</p>
+          <p class="muted">Create your account and sign-in key. You'll get a recovery code to save, and can create or unlock vaults after signing in.</p>
         </div>
         <label class="field">Server
           <input name="server" type="url" required placeholder="https://drive.example.org" spellcheck="false">
@@ -54,7 +64,6 @@
         <p class="hint center">You'll enter your security key's PIN and touch it when prompted.</p>
       </form>
 
-      <button class="btn link back-to-unlock" type="button" id="auth-back" hidden>&lt;- Back to unlock</button>
     </div>
     <div class="auth-art" aria-hidden="true">
       <div class="art-card">
@@ -69,36 +78,16 @@
     </div>
   </section>
 
-  <!-- ============ Locked ============ -->
-  <section id="view-locked" class="locked-view" hidden>
-    <div class="locked-card">
-      <div class="avatar xl" id="locked-avatar"></div>
-      <h1 id="locked-user"></h1>
-      <p class="muted" id="locked-server"></p>
-      <button class="btn primary lg block" id="btn-unlock" data-icon="key">Unlock with security key</button>
-      <p class="form-error" id="locked-error" hidden></p>
-      <div class="locked-links">
-        <button class="btn link" id="btn-recovery">Use recovery code</button>
-        <span class="dot" aria-hidden="true"></span>
-        <button class="btn link" id="btn-switch">Use a different account</button>
-        <span class="dot" aria-hidden="true"></span>
-        <button class="btn link" id="btn-logout-locked">Log out</button>
-      </div>
-    </div>
-  </section>
-
   <!-- ============ Drive ============ -->
   <section id="view-drive" class="drive-view" hidden>
     <aside class="sidebar">
-      <div class="brand"><span class="logo" aria-hidden="true"></span><span>Strongbox</span></div>
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span class="wordmark" aria-label="Strongbox">Strong<b>box</b></span></div>
       <button class="btn new-btn" id="btn-new" data-icon="plus">New</button>
-      <button class="btn ghost" id="btn-new-vault-drive" hidden>Create another vault...</button>
-      <button class="btn ghost" id="btn-open-vault-drive" hidden>Unlock another vault...</button>
+      <button class="btn ghost" id="btn-new-vault-drive">Create another vault...</button>
+      <button class="btn ghost" id="btn-open-vault-drive">Unlock another vault...</button>
       <nav class="nav" aria-label="Places">
-        <button class="nav-item" id="nav-drive" data-icon="drive" data-drop-target="/">My Drive</button>
-        <div id="vault-tabs" class="vault-tabs" role="tablist" aria-label="Unlocked vaults" hidden></div>
+        <div id="vault-tabs" class="vault-tabs" role="tablist" aria-label="Unlocked vaults"></div>
         <div id="vault-empty-note" class="vault-empty-note muted" hidden>No vaults unlocked</div>
-        <button class="nav-item" id="nav-trash" data-icon="trash">Trash</button>
       </nav>
       <div class="sidebar-spacer"></div>
       <div class="storage">
@@ -114,7 +103,6 @@
         </div>
         <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings" data-icon="settings"></button>
         <button class="icon-btn" id="btn-lock" title="Lock (Ctrl+L)" aria-label="Lock" data-icon="lock"></button>
-        <button class="icon-btn" id="btn-logout" title="Log out and forget this account" aria-label="Log out" data-icon="log-out"></button>
       </div>
     </aside>
 
@@ -122,7 +110,7 @@
       <header class="topbar">
         <div class="search">
           <span class="search-icon" data-icon="search"></span>
-          <input id="search" type="search" placeholder="Search in Drive" spellcheck="false" autocomplete="off" aria-label="Search">
+          <input id="search" type="search" placeholder="Search in this vault" spellcheck="false" autocomplete="off" aria-label="Search">
           <kbd class="search-kbd">Ctrl K</kbd>
         </div>
         <div class="topbar-actions">
@@ -137,7 +125,6 @@
         <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
         <div class="pathbar-actions" id="folder-actions">
           <button class="btn ghost sm" id="btn-refresh" title="Refresh (F5)" data-icon="refresh">Refresh</button>
-          <button class="btn sm danger-ghost" id="btn-empty-trash" data-icon="trash" hidden>Empty trash</button>
         </div>
         <div class="selection-bar" id="selection-bar" hidden>
           <button class="icon-btn" id="sel-clear" title="Clear selection (Esc)" aria-label="Clear selection" data-icon="x"></button>
@@ -147,9 +134,6 @@
       </div>
 
       <div class="content" id="content" tabindex="0">
-        <div class="trash-note" id="trash-note" hidden>
-          <span data-icon="info"></span> Items in the trash still count toward your storage. Restore them, or delete them forever.
-        </div>
         <div class="list-head" id="list-head">
           <span class="col-check"><span class="cb" id="select-all" role="checkbox" aria-checked="false" aria-label="Select all" tabindex="0"></span></span>
           <button class="col-name sort" data-sort="name">Name</button>
@@ -224,7 +208,7 @@
   <!-- Settings -->
   <dialog id="settings" class="dialog wide">
     <div class="dialog-head">
-      <h2 id="settings-title">Settings</h2>
+      <h2 id="settings-title">Account security</h2>
       <button class="icon-btn" id="settings-close" aria-label="Close" data-icon="x"></button>
     </div>
     <div class="settings-body">
@@ -238,13 +222,13 @@
       </section>
       <section>
         <div class="section-head">
-          <h3 id="signin-methods-title">Security keys &amp; recovery</h3>
+          <h3 id="signin-methods-title">Account sign-in</h3>
         </div>
-        <p class="muted small" id="signin-methods-note">Any one of these methods unlocks your drive. Keep a backup method in a safe place.</p>
+        <p class="muted small" id="signin-methods-note">These methods sign in to your account. A security key must also be granted access to each vault you want it to open. Account recovery codes do not unlock vaults.</p>
         <ul class="key-list" id="keys-list"></ul>
         <div class="row gap">
-          <button class="btn" id="btn-add-key" data-icon="plus">Add security key</button>
-          <button class="btn ghost" id="btn-add-recovery" data-icon="file-key">New recovery code</button>
+          <button class="btn" id="btn-add-key" data-icon="plus">Add backup key</button>
+          <button class="btn ghost" id="btn-add-recovery" data-icon="file-key">New account recovery code</button>
         </div>
       </section>
       <section>
@@ -261,7 +245,7 @@
         <div class="field inline panic-row">
           <div>
             <div>Panic key</div>
-            <div class="hint">Instantly locks the drive and wipes all keys from memory. Works while this window is focused.</div>
+            <div class="hint">Instantly locks all vaults and wipes all keys from memory. Works while this window is focused.</div>
           </div>
           <div class="row gap">
             <span id="panic-combo" class="combo">Not set</span>
@@ -303,11 +287,14 @@
         <h3>Security keys</h3>
         <p class="muted small">Account keys can sign in, but only keys listed as able to open this vault can unlock its data.</p>
         <ul class="key-list" id="vault-access-keys"></ul>
-        <div><button class="btn" id="btn-add-vault-key" data-icon="plus">Add security key to this vault</button></div>
+        <div class="btn-row">
+          <button class="btn" id="btn-add-vault-key" data-icon="plus">Add security key to this vault</button>
+          <button class="btn ghost" id="btn-change-vault-pin" data-icon="key">Change vault PIN</button>
+        </div>
       </section>
       <section>
         <h3>Recovery codes for this vault</h3>
-        <p class="muted small">Each code opens this vault only.</p>
+        <p class="muted small">Each code opens this vault only. It also signs in to your account, but does not open your other vaults.</p>
         <ul class="key-list" id="vault-recovery-list"></ul>
         <div><button class="btn ghost" id="btn-new-vault-recovery" data-icon="file-key">Create vault recovery code</button></div>
       </section>

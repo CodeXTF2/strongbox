@@ -4,8 +4,8 @@
 //!
 //! * **enroll**: create a non-discoverable credential with `hmac-secret` enabled, requiring
 //!   user verification (PIN);
-//! * **prf**: evaluate the WebAuthn PRF extension for one of a set of credentials, again with
-//!   user verification required.
+//! * **prf2**: evaluate the WebAuthn PRF extension (one or two inputs, one touch) for one of a
+//!   set of credentials, again with user verification required.
 //!
 //! PRF semantics are used everywhere (the hmac-secret salt is
 //! `SHA-256("WebAuthn PRF" || 0x00 || input)`), so a credential gives the same output from
@@ -58,17 +58,6 @@ pub trait Interaction: Send + Sync {
     fn request_pin(&self, attempts_left: Option<u8>) -> Option<String>;
 }
 
-pub struct CredentialSalt {
-    pub credential_id: Vec<u8>,
-    /// PRF `eval.first` input.
-    pub prf_salt: Vec<u8>,
-}
-
-pub struct PrfOutput {
-    pub credential_id: Vec<u8>,
-    pub output: Zeroizing<[u8; 32]>,
-}
-
 /// Both PRF outputs of one assertion (one touch).
 pub struct PrfPair {
     pub credential_id: Vec<u8>,
@@ -110,9 +99,6 @@ pub trait Authenticator: Send + Sync {
     /// Create a credential with hmac-secret enabled and return its id. `exclude` lists
     /// credential ids already registered, so the same key is not enrolled twice.
     fn enroll(&self, rp_id: &str, user_name: &str, exclude: &[Vec<u8>]) -> Result<Vec<u8>>;
-
-    /// Evaluate PRF on whichever of `creds` is present, with user verification.
-    fn prf(&self, rp_id: &str, creds: &[CredentialSalt]) -> Result<PrfOutput>;
 
     /// Evaluate PRF with the same one or two inputs on whichever of `allow` is present, with
     /// user verification: two derivations for a single touch.

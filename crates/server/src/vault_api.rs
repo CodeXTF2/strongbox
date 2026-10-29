@@ -23,7 +23,7 @@ use strongbox_core::vault::{locator_hash, verify_challenge, RECORD_LEN};
 use strongbox_proto::*;
 
 use crate::api::{check_registration, decoy_bytes, rate_limit, ClientIp};
-use crate::db::{KeyslotAdd, KeyslotDelete};
+use crate::db::{MemberAdd, MemberDelete};
 use crate::error::{AppError, AppResult};
 use crate::AppState;
 
@@ -77,7 +77,7 @@ impl VaultSessions {
 pub fn routes(state: &AppState) -> Router<Arc<AppState>> {
     let bs = state.vaults.layout.block_size as usize;
     Router::new()
-        .route("/v2/vaults", post(create_vault))
+        .route("/v2/vaults", post(create_vault).delete(delete_account))
         .route("/v2/lookup/{lookup}", get(lookup))
         .route("/v2/record", put(update_record))
         .route("/v2/auth/challenge", post(challenge))
@@ -151,7 +151,16 @@ async fn create_vault(
     let vid = vault_id.clone();
     tokio::task::spawn_blocking(move || st.vaults.create(&vid))
         .await
-        .map_err(|_| AppError::from(std::io::Error::other("fill task")))??;
+        .map_err(|_| AppError::from(std::io::Error::other("fill task")))?
+        .map_err(|e| {
+            // Creating the vault's directory can't be "not found" in the user's sense; a missing
+            // data directory is a server fault, not a missing account.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AppError::from(std::io::Error::other(e))
+            } else {
+                AppError::from(e)
+            }
+        })?;
     if !s
         .db
         .create_vault(
@@ -200,7 +209,12 @@ async fn lookup(
         Some(r) => r,
         // Keyed on the canonical hex: hex::decode also accepts upper case, and a decoy keyed on the
         // raw string would differ between spellings of one id, unlike a real record.
-        None => decoy_bytes(&s.decoy_secret, &hex::encode(&id), "vault-record", RECORD_LEN),
+        None => decoy_bytes(
+            &s.decoy_secret,
+            &hex::encode(&id),
+            "vault-record",
+            RECORD_LEN,
+        ),
     };
     Ok(Json(RecordResponse { record }))
 }
@@ -287,6 +301,18 @@ async fn create_session(
     }))
 }
 
+/// Permanently delete the signed-in account: its lookup record, members and every drive.
+async fn delete_account(State(s): St, auth: VaultAuthed) -> AppResult<StatusCode> {
+    s.db.delete_vault(&auth.vault).await?;
+    match s.vaults.delete(&auth.vault) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    s.vault_sessions.remove_vault_sessions(&auth.vault);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn logout(State(s): St, auth: VaultAuthed) -> StatusCode {
     s.vault_sessions
         .sessions
@@ -326,13 +352,13 @@ async fn add_member(
         .add_vault_member(&auth.vault, &lh, &req.auth_public_key, MAX_MEMBERS)
         .await?
     {
-        KeyslotAdd::Added => Ok(StatusCode::NO_CONTENT),
-        KeyslotAdd::Exists => Err(AppError::new(
+        MemberAdd::Added => Ok(StatusCode::NO_CONTENT),
+        MemberAdd::Exists => Err(AppError::new(
             StatusCode::CONFLICT,
             ErrorCode::Conflict,
             "already a member",
         )),
-        KeyslotAdd::TooMany => Err(AppError::bad_request("too many members")),
+        MemberAdd::TooMany => Err(AppError::bad_request("too many members")),
     }
 }
 
@@ -343,9 +369,9 @@ async fn remove_member(
 ) -> AppResult<StatusCode> {
     let lh = hex::decode(&id).map_err(|_| AppError::bad_request("invalid member id"))?;
     match s.db.remove_vault_member(&auth.vault, &lh).await? {
-        KeyslotDelete::Deleted => Ok(StatusCode::NO_CONTENT),
-        KeyslotDelete::NotFound => Err(AppError::not_found()),
-        KeyslotDelete::LastKeyslot => Err(AppError::new(
+        MemberDelete::Deleted => Ok(StatusCode::NO_CONTENT),
+        MemberDelete::NotFound => Err(AppError::not_found()),
+        MemberDelete::LastMember => Err(AppError::new(
             StatusCode::CONFLICT,
             ErrorCode::Conflict,
             "refusing to remove the last member (the vault would become unreachable)",

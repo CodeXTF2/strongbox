@@ -3,8 +3,8 @@
 Status: implemented in the library, server, CLI and desktop UI; tested with the software
 authenticator only. **Not audited.**
 
-This replaces username accounts for users who need deniability. The original account format
-(`docs/crypto-spec.md`) stays supported; the two do not share any server state.
+This is Strongbox's only account and storage format: an account is a secret username, its
+security keys and recovery codes, and any number of fixed-size drives.
 
 ## 1. Threat model
 
@@ -107,11 +107,24 @@ server: vault = 100 slots × fixed number of fixed-size blocks, all random from 
   wraps that drive's key in one entry of its encrypted header. The same account key can be
   granted separately to multiple drives.
 
-PRF semantics as in `crypto-spec.md`: `hmac_salt = SHA-256("WebAuthn PRF" ‖ 0x00 ‖ input)`.
+PRF semantics are those of WebAuthn: `hmac_salt = SHA-256("WebAuthn PRF" ‖ 0x00 ‖ input)` and
+`prf_output = HMAC-SHA256(credRandomWithUV, hmac_salt)`, computed inside the authenticator after
+PIN verification. Nothing derived from `prf_output` is brute-forceable offline. Clients reject
+any registration or assertion whose authenticator data lacks the user-verification flag, and
+credentials are created with `credProtect` level 3 so that CTAP 2.0 keys cannot release
+`prf_output` without the PIN.
 
 ## 5. Derivations
 
-`H` = SHA-256, `KDF(ikm, label, parts)` = HKDF-SHA256 as in `crypto-spec.md`.
+| Use | Primitive |
+|---|---|
+| AEAD | XChaCha20-Poly1305 (24-byte nonce, 16-byte tag) |
+| KDF | HKDF-SHA256; `info = label ‖ 0x00 ‖ (u32be len ‖ part)*` |
+| Username hardening | Argon2id v1.3, m = 64 MiB, t = 3, p = 4 |
+| Login signatures | Ed25519 (`verify_strict`) |
+| Hash | SHA-256 |
+
+`H` = SHA-256, `KDF(ikm, label, parts)` = HKDF-SHA256 as above.
 
 ```
 VAULT_SALT          = "strongbox/vault-salt/v1"
@@ -240,6 +253,7 @@ The client requires at least 8 digits and recommends 10, or a passphrase.
 | `POST /v2/vaults` | invite/open | create a vault (allocates and fills all slots) with its username record and first member |
 | `GET /v2/lookup/{id}` | – (rate-limited) | encrypted credential record, or a stable decoy |
 | `PUT /v2/record` | bearer | replace this vault's record (backup keys) |
+| `DELETE /v2/vaults` | bearer | delete the account: its record, members and every drive |
 | `POST /v2/auth/challenge` | – | challenge for a locator; unknown locators get an equally random one |
 | `POST /v2/auth/session` | – | Ed25519 signature over the challenge → bearer token |
 | `GET /v2/members`, `POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys / recovery codes (last member cannot be removed) |

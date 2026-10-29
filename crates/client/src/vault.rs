@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use strongbox_core::node::validate_name;
+use strongbox_core::names::validate_name;
 use strongbox_core::vault::{
     self as v, check_drive_pin, drive_salt, entry_key, header_entries, open_header,
     open_header_body, Entry, EntryKind, HeaderBody, MemberCreds, RecoveryCode, UsernameKeys, VDir,
@@ -27,9 +27,11 @@ use strongbox_proto::{
 };
 
 use crate::api::Api;
-use crate::drive::{ListEntry, OnConflict, TransferOptions};
-use crate::profile::DEFAULT_RP_ID;
+use crate::transfer::{ListEntry, OnConflict, TransferOptions};
 use crate::{Error, Result};
+
+/// WebAuthn relying party id for every credential Strongbox creates.
+pub const DEFAULT_RP_ID: &str = "strongbox.app";
 
 struct Inner {
     api: Api,
@@ -75,9 +77,7 @@ fn now_ms() -> i64 {
 async fn server(server_url: &str) -> Result<(Api, String, VaultLayout)> {
     let api = Api::new(server_url)?;
     let info = api.info().await?;
-    let layout = info
-        .vault
-        .ok_or_else(|| Error::Invalid("this server does not support vaults".into()))?;
+    let layout = info.vault;
     if layout.block_size as usize != v::BLOCK_SIZE
         || layout.blocks_per_slot <= HEADER_BLOCKS
         || layout.slots == 0
@@ -228,10 +228,9 @@ async fn enroll_with_vault_secret(
     exclude: &[Vec<u8>],
 ) -> Result<(Vec<u8>, zeroize::Zeroizing<[u8; 32]>)> {
     let (a, exclude) = (authn.clone(), exclude.to_vec());
-    let enrolled = blocking(move || {
-        a.enroll_prf(DEFAULT_RP_ID, VAULT_USER_NAME, &exclude, VAULT_SALT)
-    })
-    .await?;
+    let enrolled =
+        blocking(move || a.enroll_prf(DEFAULT_RP_ID, VAULT_USER_NAME, &exclude, VAULT_SALT))
+            .await?;
     if let Some(first) = enrolled.first {
         return Ok((enrolled.credential_id, first));
     }
@@ -510,6 +509,68 @@ impl VaultClient {
         self.inner.members.lock().unwrap().clone()
     }
 
+    /// Rename a security key or recovery code. Labels live only in the encrypted record.
+    pub async fn rename_member(&self, id: &str, label: &str) -> Result<()> {
+        let label = self.clean_label(label, &[id.to_string()])?;
+        let mut members = self.inner.members.lock().unwrap().clone();
+        members
+            .iter_mut()
+            .find(|member| member.id == id)
+            .ok_or_else(|| Error::Invalid("account key or recovery code not found".into()))?
+            .label = label;
+        let credentials = self.inner.credentials.lock().unwrap().clone();
+        let record = self.inner.username.seal_record(&credentials, &members)?;
+        self.api()
+            .update_vault_record(&UpdateRecordRequest {
+                lookup: self.inner.username.lookup.to_vec(),
+                record,
+            })
+            .await?;
+        *self.inner.members.lock().unwrap() = members;
+        Ok(())
+    }
+
+    /// Trim a key or recovery-code name and refuse empty, over-long or duplicate ones. Names
+    /// are compared ignoring case and surrounding spaces; `ignore` lists members being replaced.
+    fn clean_label(&self, label: &str, ignore: &[String]) -> Result<String> {
+        let label = label.trim();
+        if label.is_empty() || label.chars().count() > 80 {
+            return Err(Error::Invalid("enter a name up to 80 characters".into()));
+        }
+        if self.label_taken(label, ignore) {
+            return Err(Error::Invalid(format!(
+                "a key or recovery code is already named “{label}”; choose another name"
+            )));
+        }
+        Ok(label.to_string())
+    }
+
+    fn label_taken(&self, label: &str, ignore: &[String]) -> bool {
+        let key = label.trim().to_lowercase();
+        self.inner
+            .members
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| !ignore.contains(&m.id) && m.label.trim().to_lowercase() == key)
+    }
+
+    /// `base`, or `base` with the lowest free number after it ("Recovery code 2"), to prefill
+    /// the name prompt. `ignore` lists members that are about to be replaced.
+    pub fn suggest_label(&self, base: &str, ignore: &[String]) -> String {
+        if !self.label_taken(base, ignore) {
+            return base.to_string();
+        }
+        let stem = base
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .trim_end();
+        let stem = if stem.is_empty() { base } else { stem };
+        (2..)
+            .map(|n| format!("{stem} {n}"))
+            .find(|c| !self.label_taken(c, ignore))
+            .unwrap()
+    }
+
     /// Copy the decrypted account member record to another open session for this account.
     pub fn sync_account_record_from(&self, source: &Self) {
         if Arc::ptr_eq(&self.inner, &source.inner) {
@@ -527,6 +588,7 @@ impl VaultClient {
         authn: Arc<dyn Authenticator>,
         label: &str,
     ) -> Result<()> {
+        let label = self.clean_label(label, &[])?;
         let mut credentials = self.inner.credentials.lock().unwrap().clone();
         if credentials.len() >= v::MAX_RECORD_CREDENTIALS {
             return Err(Error::Invalid(format!(
@@ -541,7 +603,7 @@ impl VaultClient {
         let mut members = self.inner.members.lock().unwrap().clone();
         members.push(VaultMemberLabel {
             id: member_id(&member.locator),
-            label: label.to_string(),
+            label: label.clone(),
             kind: "security_key".into(),
             slot: None,
         });
@@ -559,13 +621,14 @@ impl VaultClient {
 
     /// Add an account recovery code. It authenticates the account but cannot open drives.
     pub async fn new_account_recovery_code_named(&self, label: &str) -> Result<String> {
+        let label = self.clean_label(label, &[])?;
         let code = RecoveryCode::generate();
         let member = code.member_creds();
         self.add_member(&member).await?;
         let mut members = self.inner.members.lock().unwrap().clone();
         members.push(VaultMemberLabel {
             id: member_id(&member.locator),
-            label: label.to_string(),
+            label: label.clone(),
             kind: "recovery_code".into(),
             slot: None,
         });
@@ -773,6 +836,84 @@ impl VaultDrive {
         self.commit(self.tree.clone()).await
     }
 
+    /// Change this drive's PIN for the security key that opened it (one touch). Other keys'
+    /// entries were derived from the old PIN, so they are revoked and can be granted again
+    /// with the new one. Returns how many were revoked. Recovery codes are unaffected.
+    pub async fn change_pin(
+        &mut self,
+        authn: Arc<dyn Authenticator>,
+        new_pin: &str,
+    ) -> Result<usize> {
+        check_drive_pin(new_pin)?;
+        let (_, current) = self.client.members().await?;
+        let mine = self
+            .body
+            .grants
+            .iter()
+            .find(|g| g.member_id == current && (g.entry as usize) < KEY_ENTRIES)
+            .cloned()
+            .ok_or_else(|| {
+                Error::Invalid(
+                    "only a security key that opens this vault can change its PIN".into(),
+                )
+            })?;
+        let credential = {
+            let members = self.client.inner.members.lock().unwrap();
+            let credentials = self.client.inner.credentials.lock().unwrap();
+            let index = members
+                .iter()
+                .filter(|m| m.kind == "security_key")
+                .position(|m| m.id == current)
+                .ok_or_else(|| Error::Invalid("account security key not found".into()))?;
+            credentials
+                .get(index)
+                .cloned()
+                .ok_or_else(|| Error::Invalid("account security key record is incomplete".into()))?
+        };
+        let salt = drive_salt(self.slot, new_pin);
+        let allow = vec![credential];
+        let pair =
+            blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, VAULT_SALT, Some(&salt))).await?;
+        let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
+        if member_id(&MemberCreds::from_prf(&pair.first).locator) != current {
+            return Err(Error::Invalid(
+                "touch the security key you unlocked this vault with".into(),
+            ));
+        }
+        let dk = self.dk()?;
+        let mut revoked = 0;
+        let others: Vec<VaultGrant> = self
+            .body
+            .grants
+            .iter()
+            .filter(|g| g.member_id != current && (g.entry as usize) < KEY_ENTRIES)
+            .cloned()
+            .collect();
+        for grant in others {
+            self.entries[grant.entry as usize] = v::random_entry();
+            self.body.used_entries &= !(1u16 << grant.entry);
+            self.body.grants.retain(|g| g.member_id != grant.member_id);
+            revoked += 1;
+        }
+        let index = mine.entry as usize;
+        self.entries[index] = v::wrap_entry(self.slot, index, &entry_key(&second), &dk);
+        let tree = self.tree.clone();
+        self.commit(tree.clone()).await?;
+        // Rewrite both header copies so an older copy cannot keep an entry for the old PIN.
+        self.commit(tree).await?;
+        Ok(revoked)
+    }
+
+    /// Ids of this drive's recovery codes (a new one replaces them).
+    pub fn recovery_ids(&self) -> Vec<String> {
+        self.client
+            .member_labels()
+            .into_iter()
+            .filter(|m| m.kind == "recovery_code" && m.slot == Some(self.slot))
+            .map(|m| m.id)
+            .collect()
+    }
+
     /// Revoke one account key from this drive. The other account keys remain unaffected.
     pub async fn revoke_account_key(&mut self, member_id: &str) -> Result<()> {
         let grant = self
@@ -880,7 +1021,7 @@ impl VaultDrive {
         let mut dirs = vec![std::path::PathBuf::new()];
         let mut stack = vec![(std::path::PathBuf::new(), comps(remote)?, root)];
         while let Some((rel, rc, d)) = stack.pop() {
-            crate::drive::check_local_name_clashes(d.entries.keys())?;
+            crate::transfer::check_local_name_clashes(d.entries.keys())?;
             for (n, node) in &d.entries {
                 let child = rel.join(crate::local_safe_name(n));
                 let mut cc = rc.clone();
@@ -1307,6 +1448,7 @@ impl VaultDrive {
         pin: &str,
         label: &str,
     ) -> Result<()> {
+        let label = self.client.clean_label(label, &[])?;
         let index = (0..KEY_ENTRIES)
             .find(|i| self.body.used_entries & (1 << i) == 0)
             .ok_or_else(|| Error::Invalid(format!("this drive already has {KEY_ENTRIES} keys")))?;
@@ -1336,7 +1478,7 @@ impl VaultDrive {
         let mut members = inner.members.lock().unwrap().clone();
         members.push(VaultMemberLabel {
             id: added_member_id.clone(),
-            label: label.to_string(),
+            label: label.clone(),
             kind: "security_key".into(),
             slot: None,
         });
@@ -1366,6 +1508,8 @@ impl VaultDrive {
     }
 
     pub async fn new_recovery_code_named(&mut self, label: &str) -> Result<String> {
+        let old_ids = self.recovery_ids();
+        let label = self.client.clean_label(label, &old_ids)?;
         let code = RecoveryCode::generate();
         let creds = code.member_creds();
         let old_ids: Vec<String> = self
@@ -1385,7 +1529,7 @@ impl VaultDrive {
         let mut members = self.client.inner.members.lock().unwrap().clone();
         members.push(VaultMemberLabel {
             id: member_id(&creds.locator),
-            label: label.to_string(),
+            label: label.clone(),
             kind: "recovery_code".into(),
             slot: Some(self.slot),
         });

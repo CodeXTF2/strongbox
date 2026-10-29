@@ -11,10 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use strongbox_client::{
-    local_safe_name, unique_local_path, Drive, ListEntry, OnConflict, Profile, RegisterOptions,
-    SearchHit, TransferOptions, TrashEntry, Ui,
+    local_safe_name, unique_local_path, ListEntry, OnConflict, SearchHit, TransferOptions,
 };
-use strongbox_core::keyslot::KeyslotKind;
 use strongbox_fido::{Authenticator, Interaction};
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
@@ -28,10 +26,7 @@ const SESSION_EXPIRED: &str = "SESSION_EXPIRED";
 
 #[derive(Default)]
 struct AppState {
-    /// Shared so that lock / panic can take the drive out (and wipe its keys) at once, without
-    /// waiting for running operations, which hold their own clone until they stop.
-    drive: RwLock<Option<Arc<Drive>>>,
-    /// Open deniable vaults, with one selected for file operations.
+    /// Open vaults, with one selected for file operations.
     vaults: RwLock<HashMap<String, VaultItem>>,
     active_vault: RwLock<Option<String>>,
     vault_account: RwLock<Option<VaultAccount>>,
@@ -86,6 +81,25 @@ async fn install_vault(
     state.vaults.write().await.insert(id.clone(), item);
     *state.active_vault.write().await = Some(id.clone());
     id
+}
+
+/// Make a freshly signed-in account the only unlocked thing: whatever was open before is
+/// wiped and its server sessions ended.
+async fn sign_in_account(
+    state: &AppState,
+    client: strongbox_client::vault::VaultClient,
+    server: String,
+    username: String,
+) {
+    for previous in wipe_vault(state).await {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(5), previous.end_session()).await;
+    }
+    *state.vault_account.write().await = Some(VaultAccount {
+        client,
+        server,
+        username,
+    });
 }
 
 /// Cancellation flags for queued and running transfers, by transfer id.
@@ -168,23 +182,13 @@ impl Interaction for TauriUi {
     }
 }
 
-impl Ui for TauriUi {
-    fn request_password(&self) -> Option<String> {
-        self.ask("password", None)
-    }
-}
-
 type CmdResult<T> = Result<T, String>;
-
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
-}
 
 /// Client errors for the UI. An expired or revoked session gets a fixed prefix.
 fn cerr(e: strongbox_client::Error) -> String {
     match e {
         strongbox_client::Error::Api { status: 401, .. } => {
-            format!("{SESSION_EXPIRED}: your session has expired; unlock the drive again")
+            format!("{SESSION_EXPIRED}: your session has expired; unlock the vault again")
         }
         e => e.to_string(),
     }
@@ -201,14 +205,6 @@ fn authenticator(app: &AppHandle, state: &AppState) -> Arc<dyn Authenticator> {
     strongbox_fido::platform(ui(app, state)).into()
 }
 
-macro_rules! with_drive {
-    ($state:expr, $d:ident => $body:expr) => {{
-        let $d = current(&$state).await?;
-        let $d = &*$d;
-        $body.await.map_err(cerr)
-    }};
-}
-
 fn nonempty(s: Option<String>) -> Option<String> {
     s.filter(|s| !s.is_empty())
 }
@@ -218,74 +214,6 @@ fn answer_prompt(state: State<'_, AppState>, value: Option<String>) {
     if let Some(tx) = state.prompt.lock().unwrap().take() {
         let _ = tx.send(value);
     }
-}
-
-#[tauri::command]
-fn get_profile() -> CmdResult<Option<Profile>> {
-    Profile::load().map_err(err)
-}
-
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-async fn register(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
-    invite: Option<String>,
-    label: String,
-    password: Option<String>,
-    recovery: bool,
-) -> CmdResult<Option<String>> {
-    let opts = RegisterOptions {
-        server_url: server,
-        username,
-        invite: nonempty(invite),
-        key_label: label,
-        password: nonempty(password),
-        recovery_code: recovery,
-        rp_id: None,
-    };
-    let (drive, code) = strongbox_client::register(opts, authenticator(&app, &state))
-        .await
-        .map_err(cerr)?;
-    *state.drive.write().await = Some(Arc::new(drive));
-    Ok(code)
-}
-
-/// Sign in to an existing account from this device (no local profile needed).
-#[tauri::command]
-async fn sign_in(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
-) -> CmdResult<()> {
-    let drive = strongbox_client::sign_in(
-        &server,
-        &username,
-        None,
-        authenticator(&app, &state),
-        ui(&app, &state),
-    )
-    .await
-    .map_err(cerr)?;
-    *state.drive.write().await = Some(Arc::new(drive));
-    Ok(())
-}
-
-#[tauri::command]
-async fn sign_in_with_recovery(
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
-    code: String,
-) -> CmdResult<()> {
-    let drive = strongbox_client::sign_in_with_recovery(&server, &username, &code)
-        .await
-        .map_err(cerr)?;
-    *state.drive.write().await = Some(Arc::new(drive));
-    Ok(())
 }
 
 #[tauri::command]
@@ -306,19 +234,7 @@ async fn vault_create_account(
     )
     .await
     .map_err(cerr)?;
-    if let Some(drive) = wipe_now(&state).await {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), drive.end_session()).await;
-    }
-    for previous in wipe_vault(&state).await {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(5), previous.end_session()).await;
-    }
-    *state.vault_account.write().await = Some(VaultAccount {
-        client,
-        server,
-        username,
-    });
-    let _ = Profile::forget();
+    sign_in_account(&state, client, server, username).await;
     Ok(())
 }
 
@@ -341,19 +257,7 @@ async fn vault_sign_in(
         strongbox_client::vault::connect_account(&server, &username, authenticator(&app, &state))
             .await
             .map_err(cerr)?;
-    if let Some(drive) = wipe_now(&state).await {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), drive.end_session()).await;
-    }
-    for previous in wipe_vault(&state).await {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(5), previous.end_session()).await;
-    }
-    *state.vault_account.write().await = Some(VaultAccount {
-        client,
-        server,
-        username,
-    });
-    let _ = Profile::forget();
+    sign_in_account(&state, client, server, username).await;
     Ok(())
 }
 
@@ -367,19 +271,7 @@ async fn vault_account_recover(
     let client = strongbox_client::vault::connect_account_with_recovery(&server, &username, &code)
         .await
         .map_err(cerr)?;
-    if let Some(drive) = wipe_now(&state).await {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), drive.end_session()).await;
-    }
-    for previous in wipe_vault(&state).await {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(5), previous.end_session()).await;
-    }
-    *state.vault_account.write().await = Some(VaultAccount {
-        client,
-        server,
-        username,
-    });
-    let _ = Profile::forget();
+    sign_in_account(&state, client, server, username).await;
     Ok(())
 }
 
@@ -411,7 +303,6 @@ async fn vault_open(
             .map_err(cerr)?
             .ok_or("No drive found for that slot and PIN")?
     };
-    *state.drive.write().await = None;
     install_vault(&state, client, drive, server, username, slot).await;
     Ok(())
 }
@@ -432,7 +323,6 @@ async fn vault_recover(
         .await
         .map_err(cerr)?
         .ok_or("Recovery code did not open a drive")?;
-    *state.drive.write().await = None;
     install_vault(&state, client, drive, server, username, slot).await;
     Ok(slot)
 }
@@ -642,6 +532,54 @@ struct VaultMemberView {
     current: bool,
 }
 
+/// A free name to prefill a key or recovery-code name prompt: `base`, else `base 2`, `base 3`...
+/// With `replaces_vault_recovery`, this vault's current recovery code does not count (a new
+/// one replaces it).
+#[tauri::command]
+async fn vault_suggest_label(
+    state: State<'_, AppState>,
+    base: String,
+    replaces_vault_recovery: bool,
+) -> CmdResult<String> {
+    let client = current_vault_client(&state).await?;
+    let ignore = if replaces_vault_recovery {
+        let v = current_vault(&state).await?;
+        let session = v.lock().await;
+        session.drive.recovery_ids()
+    } else {
+        Vec::new()
+    };
+    Ok(client.suggest_label(&base, &ignore))
+}
+
+#[tauri::command]
+async fn vault_rename_member(
+    state: State<'_, AppState>,
+    id: String,
+    label: String,
+) -> CmdResult<()> {
+    let client = current_vault_client(&state).await?;
+    client.rename_member(&id, &label).await.map_err(cerr)?;
+    sync_vault_clients(&state, &client).await;
+    Ok(())
+}
+
+/// Returns how many other keys lost access to the vault (they used the old PIN).
+#[tauri::command]
+async fn vault_change_pin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    new_pin: String,
+) -> CmdResult<usize> {
+    let v = current_vault(&state).await?;
+    let mut session = v.lock().await;
+    session
+        .drive
+        .change_pin(authenticator(&app, &state), &new_pin)
+        .await
+        .map_err(cerr)
+}
+
 #[tauri::command]
 async fn vault_remove_member(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let client = current_vault_client(&state).await?;
@@ -760,45 +698,11 @@ async fn vault_lock(state: State<'_, AppState>, id: String) -> CmdResult<bool> {
     Ok(remaining.is_some() || state.vault_account.read().await.is_some())
 }
 
-#[tauri::command]
-async fn unlock(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    let profile = Profile::load()
-        .map_err(err)?
-        .ok_or("no account configured")?;
-    let drive = strongbox_client::login(profile, authenticator(&app, &state), ui(&app, &state))
-        .await
-        .map_err(cerr)?;
-    *state.drive.write().await = Some(Arc::new(drive));
-    Ok(())
-}
-
-#[tauri::command]
-async fn unlock_with_recovery(state: State<'_, AppState>, code: String) -> CmdResult<()> {
-    let profile = Profile::load()
-        .map_err(err)?
-        .ok_or("no account configured")?;
-    let drive = strongbox_client::login_with_recovery(profile, &code)
-        .await
-        .map_err(cerr)?;
-    *state.drive.write().await = Some(Arc::new(drive));
-    Ok(())
-}
-
-/// The unlocked drive, cloned out so the state lock is never held during an operation.
-async fn current(state: &AppState) -> Result<Arc<Drive>, String> {
-    state
-        .drive
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| "locked".to_string())
-}
-
-/// Take the drive out of the app state, stop everything using it and wipe its keys. Returns
-/// it so the caller can end the server session.
-async fn wipe_now(state: &AppState) -> Option<Arc<Drive>> {
+/// Stop everything using the keys, then wipe every open vault's keys and take the sessions out
+/// of the app state. Returns the clients so the caller can end their server sessions.
+async fn wipe_vault(state: &AppState) -> Vec<strongbox_client::vault::VaultClient> {
     state.transfers.cancel(None);
-    // Unblock an authenticator thread waiting for a PIN/password from the UI.
+    // Unblock an authenticator thread waiting for a PIN from the UI.
     if let Some(tx) = state
         .prompt
         .lock()
@@ -807,13 +711,6 @@ async fn wipe_now(state: &AppState) -> Option<Arc<Drive>> {
     {
         let _ = tx.send(None);
     }
-    let drive = state.drive.write().await.take()?;
-    drive.wipe();
-    Some(drive)
-}
-
-async fn wipe_vault(state: &AppState) -> Vec<strongbox_client::vault::VaultClient> {
-    state.transfers.cancel(None);
     *state.active_vault.write().await = None;
     let vaults = std::mem::take(&mut *state.vaults.write().await);
     let mut clients = Vec::with_capacity(vaults.len());
@@ -828,12 +725,9 @@ async fn wipe_vault(state: &AppState) -> Vec<strongbox_client::vault::VaultClien
 }
 
 /// Forget the keys. Always succeeds locally: a failed server logout (offline, session already
-/// expired) must not leave the drive unlocked.
+/// expired) must not leave a vault unlocked.
 #[tauri::command]
 async fn lock(state: State<'_, AppState>) -> CmdResult<()> {
-    if let Some(drive) = wipe_now(&state).await {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), drive.end_session()).await;
-    }
     for client in wipe_vault(&state).await {
         let _ =
             tokio::time::timeout(std::time::Duration::from_secs(10), client.end_session()).await;
@@ -845,40 +739,29 @@ async fn lock(state: State<'_, AppState>) -> CmdResult<()> {
 /// background with a short timeout, so the wipe never waits on the network.
 #[tauri::command]
 async fn panic_lock(state: State<'_, AppState>) -> CmdResult<()> {
-    if let Some(drive) = wipe_now(&state).await {
-        tauri::async_runtime::spawn(async move {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(5), drive.end_session()).await;
-        });
-    }
     for client in wipe_vault(&state).await {
         tauri::async_runtime::spawn(async move {
             let _ =
                 tokio::time::timeout(std::time::Duration::from_secs(5), client.end_session()).await;
         });
     }
-    // Also forget the cached account so the next screen is the plain sign-in, not the
-    // "welcome back, <name>" lock screen.
-    Profile::forget().map_err(err)
+    Ok(())
 }
 
-/// Log out: wipe the keys, end the server session and remove the cached account from this
-/// device, so the app returns to the sign-in screen.
+/// Log out: wipe the keys and end the server sessions, so the app returns to the sign-in screen.
 #[tauri::command]
 async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
-    if let Some(drive) = wipe_now(&state).await {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), drive.end_session()).await;
-    }
     for client in wipe_vault(&state).await {
         let _ =
             tokio::time::timeout(std::time::Duration::from_secs(10), client.end_session()).await;
     }
-    Profile::forget().map_err(err)
+    Ok(())
 }
 
-/// Delete the account for good: the server removes the keyslots, files and username, then the
-/// local keys and cached profile are wiped. The server call must succeed first, so a failure
-/// (offline, expired session) leaves everything as it was.
+/// Delete the account for good: the server removes the lookup record, members and every drive,
+/// then the local keys are wiped. This signs in again first (so it needs a fresh key touch), and
+/// the server call must succeed before anything local is wiped, so a failure (offline, wrong key)
+/// leaves everything as it was.
 #[tauri::command]
 async fn delete_account(
     app: AppHandle,
@@ -886,65 +769,40 @@ async fn delete_account(
     server: String,
     username: String,
 ) -> CmdResult<()> {
-    let has_vault_account =
-        state.vault_account.read().await.is_some() || !state.vaults.read().await.is_empty();
-    if has_vault_account {
-        let client = strongbox_client::vault::connect_account(
-            &server,
-            &username,
-            authenticator(&app, &state),
-        )
-        .await
-        .map_err(cerr)?;
-        client.delete_account().await.map_err(cerr)?;
-    } else {
-        let drive = strongbox_client::sign_in(
-            &server,
-            &username,
-            None,
-            authenticator(&app, &state),
-            ui(&app, &state),
-        )
-        .await
-        .map_err(cerr)?;
-        drive.delete_account().await.map_err(cerr)?;
-    }
-    if let Some(drive) = wipe_now(&state).await {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), drive.end_session()).await;
-    }
+    let client =
+        strongbox_client::vault::connect_account(&server, &username, authenticator(&app, &state))
+            .await
+            .map_err(cerr)?;
+    client.delete_account().await.map_err(cerr)?;
     for client in wipe_vault(&state).await {
         let _ =
             tokio::time::timeout(std::time::Duration::from_secs(10), client.end_session()).await;
     }
-    Profile::forget().map_err(err)
+    Ok(())
 }
 
 #[tauri::command]
 async fn list(state: State<'_, AppState>, path: String) -> CmdResult<Vec<ListEntry>> {
-    if let Ok(v) = current_vault(&state).await {
-        return v.lock().await.drive.list(&path).map_err(cerr);
-    }
-    with_drive!(state, d => d.list(&path))
+    let v = current_vault(&state).await?;
+    let session = v.lock().await;
+    session.drive.list(&path).map_err(cerr)
 }
 
 #[tauri::command]
 async fn search(state: State<'_, AppState>, query: String) -> CmdResult<Vec<SearchHit>> {
-    if let Ok(v) = current_vault(&state).await {
-        let session = v.lock().await;
-        return Ok(strongbox_client::vault::search_in(
-            session.drive.tree(),
-            &query,
-        ));
-    }
-    with_drive!(state, d => d.search(&query))
+    let v = current_vault(&state).await?;
+    let session = v.lock().await;
+    Ok(strongbox_client::vault::search_in(
+        session.drive.tree(),
+        &query,
+    ))
 }
 
 #[tauri::command]
 async fn mkdir(state: State<'_, AppState>, path: String) -> CmdResult<()> {
-    if let Ok(v) = current_vault(&state).await {
-        return v.lock().await.drive.mkdir(&path).await.map_err(cerr);
-    }
-    with_drive!(state, d => d.mkdir(&path))
+    let v = current_vault(&state).await?;
+    let mut session = v.lock().await;
+    session.drive.mkdir(&path).await.map_err(cerr)
 }
 
 fn join_remote(dir: &str, name: &str) -> String {
@@ -1000,157 +858,65 @@ async fn upload(
     dir: String,
     conflict: OnConflict,
 ) -> CmdResult<TransferSummary> {
-    if let Ok(v) = current_vault(&state).await {
-        let (dirs, files, skipped) = expand_local(&paths, &dir);
-        let mut session = v.lock().await;
-        for remote in dirs {
-            session.drive.mkdir_p(&remote).await.map_err(cerr)?;
-        }
-        let mut summary = TransferSummary {
-            done: 0,
-            failed: 0,
-            cancelled: 0,
-            skipped,
-        };
-        for (path, remote_dir) in files {
-            let total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let (id, flag) = state.transfers.start();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let mut ev = TransferEvent {
-                id,
-                kind: "upload",
-                name,
-                target: remote_dir.clone(),
-                done: 0,
-                total,
-                state: "active",
-                error: None,
-            };
-            let _ = app.emit("transfer", ev.clone());
-            let progress = {
-                let (app, ev) = (app.clone(), ev.clone());
-                move |done, total| {
-                    let _ = app.emit(
-                        "transfer",
-                        TransferEvent {
-                            done,
-                            total,
-                            ..ev.clone()
-                        },
-                    );
-                }
-            };
-            let opts = TransferOptions {
-                progress: Some(&progress),
-                cancel: Some(&flag),
-                on_conflict: conflict,
-            };
-            let res = session
-                .drive
-                .upload(&path, &remote_dir, opts)
-                .await
-                .map_err(cerr);
-            state.transfers.finish(id);
-            match res {
-                Ok(stored) => {
-                    summary.done += 1;
-                    ev.name = stored;
-                    ev.state = "done";
-                }
-                Err(e) if flag.load(Ordering::Relaxed) => {
-                    summary.cancelled += 1;
-                    ev.state = "cancelled";
-                    ev.error = Some(e);
-                }
-                Err(e) => {
-                    summary.failed += 1;
-                    ev.state = "error";
-                    ev.error = Some(e);
-                }
-            }
-            let _ = app.emit("transfer", ev);
-        }
-        return Ok(summary);
-    }
-    let d = current(&state).await?;
+    let v = current_vault(&state).await?;
     let (dirs, files, skipped) = expand_local(&paths, &dir);
-
-    let jobs: Vec<_> = files
-        .into_iter()
-        .map(|(path, remote_dir)| {
-            let (id, flag) = state.transfers.start();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let ev = TransferEvent {
-                id,
-                kind: "upload",
-                name,
-                target: remote_dir.clone(),
-                done: 0,
-                total,
-                state: "queued",
-                error: None,
-            };
-            let _ = app.emit("transfer", ev.clone());
-            (path, remote_dir, flag, ev)
-        })
-        .collect();
-
+    let mut session = v.lock().await;
+    for remote in dirs {
+        session.drive.mkdir_p(&remote).await.map_err(cerr)?;
+    }
     let mut summary = TransferSummary {
         done: 0,
         failed: 0,
         cancelled: 0,
         skipped,
     };
-    let mut dir_error = None;
-    for remote in &dirs {
-        if let Err(e) = d.mkdir_p(remote).await {
-            dir_error = Some(cerr(e));
-            break;
-        }
-    }
-
-    for (path, remote_dir, flag, mut ev) in jobs {
-        let result = if let Some(e) = &dir_error {
-            Err(e.clone())
-        } else if flag.load(Ordering::Relaxed) {
-            Err(strongbox_client::Error::Cancelled.to_string())
-        } else {
-            ev.state = "active";
-            let _ = app.emit("transfer", ev.clone());
-            let progress = {
-                let (app, ev) = (app.clone(), ev.clone());
-                move |done, total| {
-                    let _ = app.emit(
-                        "transfer",
-                        TransferEvent {
-                            done,
-                            total,
-                            ..ev.clone()
-                        },
-                    );
-                }
-            };
-            let opts = TransferOptions {
-                progress: Some(&progress),
-                cancel: Some(&flag),
-                on_conflict: conflict,
-            };
-            d.upload_with(&path, &remote_dir, opts).await.map_err(cerr)
+    for (path, remote_dir) in files {
+        let total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let (id, flag) = state.transfers.start();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut ev = TransferEvent {
+            id,
+            kind: "upload",
+            name,
+            target: remote_dir.clone(),
+            done: 0,
+            total,
+            state: "active",
+            error: None,
         };
-        state.transfers.finish(ev.id);
-        ev.done = ev.total;
-        match result {
+        let _ = app.emit("transfer", ev.clone());
+        let progress = {
+            let (app, ev) = (app.clone(), ev.clone());
+            move |done, total| {
+                let _ = app.emit(
+                    "transfer",
+                    TransferEvent {
+                        done,
+                        total,
+                        ..ev.clone()
+                    },
+                );
+            }
+        };
+        let opts = TransferOptions {
+            progress: Some(&progress),
+            cancel: Some(&flag),
+            on_conflict: conflict,
+        };
+        let res = session
+            .drive
+            .upload(&path, &remote_dir, opts)
+            .await
+            .map_err(cerr);
+        state.transfers.finish(id);
+        match res {
             Ok(stored) => {
                 summary.done += 1;
-                ev.state = "done";
                 ev.name = stored;
+                ev.state = "done";
             }
             Err(e) if flag.load(Ordering::Relaxed) => {
                 summary.cancelled += 1;
@@ -1164,11 +930,6 @@ async fn upload(
             }
         }
         let _ = app.emit("transfer", ev);
-    }
-    if summary.done == 0 && summary.failed == 0 && summary.cancelled == 0 {
-        if let Some(e) = dir_error {
-            return Err(e);
-        }
     }
     Ok(summary)
 }
@@ -1189,89 +950,8 @@ async fn download(
     dest: Option<String>,
     dest_dir: Option<String>,
 ) -> CmdResult<TransferSummary> {
-    if let Ok(v) = current_vault(&state).await {
-        let session = v.lock().await;
-        let mut summary = TransferSummary {
-            done: 0,
-            failed: 0,
-            cancelled: 0,
-            skipped: vec![],
-        };
-        for item in items {
-            let name = item.path.rsplit('/').next().unwrap_or_default().to_string();
-            let target = match (&dest, &dest_dir) {
-                (Some(dest), _) => PathBuf::from(dest),
-                (None, Some(dir)) if item.is_dir => PathBuf::from(dir),
-                (None, Some(dir)) => unique_local_path(Path::new(dir).join(local_safe_name(&name))),
-                (None, None) => return Err("no download destination".into()),
-            };
-            let (id, flag) = state.transfers.start();
-            let mut ev = TransferEvent {
-                id,
-                kind: "download",
-                name,
-                target: target.display().to_string(),
-                done: 0,
-                total: 0,
-                state: "active",
-                error: None,
-            };
-            let _ = app.emit("transfer", ev.clone());
-            let progress = {
-                let (app, ev) = (app.clone(), ev.clone());
-                move |done, total| {
-                    let _ = app.emit(
-                        "transfer",
-                        TransferEvent {
-                            done,
-                            total,
-                            ..ev.clone()
-                        },
-                    );
-                }
-            };
-            let opts = TransferOptions {
-                progress: Some(&progress),
-                cancel: Some(&flag),
-                ..Default::default()
-            };
-            let res = if item.is_dir {
-                session
-                    .drive
-                    .download_dir(&item.path, &target, opts)
-                    .await
-                    .map(|p| p.display().to_string())
-            } else {
-                session
-                    .drive
-                    .download(&item.path, &target, opts)
-                    .await
-                    .map(|()| target.display().to_string())
-            }
-            .map_err(cerr);
-            state.transfers.finish(id);
-            match res {
-                Ok(saved) => {
-                    summary.done += 1;
-                    ev.target = saved;
-                    ev.state = "done";
-                }
-                Err(e) if flag.load(Ordering::Relaxed) => {
-                    summary.cancelled += 1;
-                    ev.error = Some(e);
-                    ev.state = "cancelled";
-                }
-                Err(e) => {
-                    summary.failed += 1;
-                    ev.error = Some(e);
-                    ev.state = "error";
-                }
-            }
-            let _ = app.emit("transfer", ev);
-        }
-        return Ok(summary);
-    }
-    let d = current(&state).await?;
+    let v = current_vault(&state).await?;
+    let session = v.lock().await;
     let mut summary = TransferSummary {
         done: 0,
         failed: 0,
@@ -1280,17 +960,17 @@ async fn download(
     };
     for item in items {
         let name = item.path.rsplit('/').next().unwrap_or_default().to_string();
-        let (id, flag) = state.transfers.start();
         let target = match (&dest, &dest_dir) {
             (Some(dest), _) => PathBuf::from(dest),
             (None, Some(dir)) if item.is_dir => PathBuf::from(dir),
             (None, Some(dir)) => unique_local_path(Path::new(dir).join(local_safe_name(&name))),
             (None, None) => return Err("no download destination".into()),
         };
+        let (id, flag) = state.transfers.start();
         let mut ev = TransferEvent {
             id,
             kind: "download",
-            name: name.clone(),
+            name,
             target: target.display().to_string(),
             done: 0,
             total: 0,
@@ -1316,31 +996,36 @@ async fn download(
             cancel: Some(&flag),
             ..Default::default()
         };
-        let result = if item.is_dir {
-            d.download_dir(&item.path, &target, opts)
+        let res = if item.is_dir {
+            session
+                .drive
+                .download_dir(&item.path, &target, opts)
                 .await
                 .map(|p| p.display().to_string())
         } else {
-            d.download_with(&item.path, &target, opts)
+            session
+                .drive
+                .download(&item.path, &target, opts)
                 .await
                 .map(|()| target.display().to_string())
-        };
+        }
+        .map_err(cerr);
         state.transfers.finish(id);
-        match result {
+        match res {
             Ok(saved) => {
                 summary.done += 1;
-                ev.state = "done";
                 ev.target = saved;
+                ev.state = "done";
             }
             Err(e) if flag.load(Ordering::Relaxed) => {
                 summary.cancelled += 1;
+                ev.error = Some(e);
                 ev.state = "cancelled";
-                ev.error = Some(cerr(e));
             }
             Err(e) => {
                 summary.failed += 1;
+                ev.error = Some(e);
                 ev.state = "error";
-                ev.error = Some(cerr(e));
             }
         }
         let _ = app.emit("transfer", ev);
@@ -1357,132 +1042,35 @@ fn cancel_transfer(state: State<'_, AppState>, id: Option<u64>) {
 /// Decrypt a file into memory for the preview pane. Raw bytes, no base64 round trip.
 #[tauri::command]
 async fn preview(state: State<'_, AppState>, path: String) -> CmdResult<Response> {
-    if let Ok(v) = current_vault(&state).await {
-        return v
-            .lock()
-            .await
-            .drive
-            .read_file(&path, MAX_PREVIEW_BYTES)
-            .await
-            .map(Response::new)
-            .map_err(cerr);
-    }
-    let bytes = with_drive!(state, d => d.read_file(&path, MAX_PREVIEW_BYTES))?;
-    Ok(Response::new(bytes))
+    let v = current_vault(&state).await?;
+    let session = v.lock().await;
+    session
+        .drive
+        .read_file(&path, MAX_PREVIEW_BYTES)
+        .await
+        .map(Response::new)
+        .map_err(cerr)
 }
 
-/// Move to the trash (returns the trash id, for undo), or delete permanently.
+/// Delete a file or folder permanently (vaults have no trash).
 #[tauri::command]
-async fn remove(
-    state: State<'_, AppState>,
-    path: String,
-    permanent: bool,
-) -> CmdResult<Option<String>> {
-    if let Ok(v) = current_vault(&state).await {
-        v.lock().await.drive.remove(&path).await.map_err(cerr)?;
-        return Ok(None);
-    }
-    if permanent {
-        with_drive!(state, d => d.remove(&path)).map(|()| None)
-    } else {
-        with_drive!(state, d => d.trash(&path)).map(Some)
-    }
+async fn remove(state: State<'_, AppState>, path: String) -> CmdResult<()> {
+    let v = current_vault(&state).await?;
+    let mut session = v.lock().await;
+    session.drive.remove(&path).await.map_err(cerr)
 }
 
-/// Whether the drive is unlocked (the UI asks after a reload).
+/// Whether anything is unlocked (the UI asks after a reload).
 #[tauri::command]
 async fn is_unlocked(state: State<'_, AppState>) -> CmdResult<bool> {
-    Ok(state.drive.read().await.is_some()
-        || state.vault_account.read().await.is_some()
-        || !state.vaults.read().await.is_empty())
-}
-
-#[tauri::command]
-async fn session_kind(state: State<'_, AppState>) -> CmdResult<&'static str> {
-    Ok(
-        if state.vault_account.read().await.is_some() || !state.vaults.read().await.is_empty() {
-            "vault"
-        } else {
-            "account"
-        },
-    )
+    Ok(state.vault_account.read().await.is_some() || !state.vaults.read().await.is_empty())
 }
 
 #[tauri::command]
 async fn rename(state: State<'_, AppState>, from: String, to: String) -> CmdResult<()> {
-    if let Ok(v) = current_vault(&state).await {
-        return v.lock().await.drive.rename(&from, &to).await.map_err(cerr);
-    }
-    with_drive!(state, d => d.rename(&from, &to))
-}
-
-#[tauri::command]
-async fn trash_list(state: State<'_, AppState>) -> CmdResult<Vec<TrashEntry>> {
-    with_drive!(state, d => d.list_trash())
-}
-
-#[tauri::command]
-async fn trash_restore(state: State<'_, AppState>, id: String) -> CmdResult<String> {
-    with_drive!(state, d => d.restore(&id))
-}
-
-#[tauri::command]
-async fn trash_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    with_drive!(state, d => d.delete_from_trash(&id))
-}
-
-#[tauri::command]
-async fn trash_empty(state: State<'_, AppState>) -> CmdResult<usize> {
-    with_drive!(state, d => d.empty_trash())
-}
-
-#[derive(Serialize)]
-struct KeyslotView {
-    id: String,
-    label: String,
-    kind: &'static str,
-}
-
-#[tauri::command]
-async fn keyslots(state: State<'_, AppState>) -> CmdResult<Vec<KeyslotView>> {
-    let slots = with_drive!(state, d => d.keyslots())?;
-    Ok(slots
-        .into_iter()
-        .map(|s| KeyslotView {
-            id: s.id.to_string(),
-            label: s.label,
-            kind: match s.kind {
-                KeyslotKind::Fido {
-                    password: Some(_), ..
-                } => "key+password",
-                KeyslotKind::Fido { .. } => "key",
-                KeyslotKind::Recovery => "recovery",
-            },
-        })
-        .collect())
-}
-
-#[tauri::command]
-async fn add_security_key(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    label: String,
-    password: Option<String>,
-) -> CmdResult<()> {
-    let authn = authenticator(&app, &state);
-    with_drive!(state, d => d.add_security_key(authn, label, nonempty(password)))?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn add_recovery_code(state: State<'_, AppState>) -> CmdResult<String> {
-    with_drive!(state, d => d.add_recovery_code())
-}
-
-#[tauri::command]
-async fn remove_keyslot(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    let id = id.parse().map_err(err)?;
-    with_drive!(state, d => d.remove_keyslot(&id))
+    let v = current_vault(&state).await?;
+    let mut session = v.lock().await;
+    session.drive.rename(&from, &to).await.map_err(cerr)
 }
 
 #[derive(Serialize)]
@@ -1505,21 +1093,13 @@ async fn account(state: State<'_, AppState>) -> CmdResult<AccountView> {
             quota_bytes: Some(quota_bytes),
         });
     }
-    if let Some(account) = state.vault_account.read().await.as_ref() {
-        return Ok(AccountView {
-            username: account.username.clone(),
-            server: account.server.clone(),
-            used_bytes: 0,
-            quota_bytes: None,
-        });
-    }
-    let d = current(&state).await?;
-    let u = d.usage().await.map_err(cerr)?;
+    let guard = state.vault_account.read().await;
+    let account = guard.as_ref().ok_or("locked")?;
     Ok(AccountView {
-        username: d.profile().username.clone(),
-        server: d.profile().server_url.clone(),
-        used_bytes: u.used_bytes,
-        quota_bytes: u.quota_bytes,
+        username: account.username.clone(),
+        server: account.server.clone(),
+        used_bytes: 0,
+        quota_bytes: None,
     })
 }
 
@@ -1529,10 +1109,6 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             answer_prompt,
-            get_profile,
-            register,
-            sign_in,
-            sign_in_with_recovery,
             vault_create_account,
             vault_sign_in,
             vault_account_recover,
@@ -1548,18 +1124,18 @@ fn main() {
             vault_revoke_recovery,
             vault_new_recovery,
             vault_members,
+            vault_rename_member,
+            vault_suggest_label,
+            vault_change_pin,
             vault_remove_member,
             vault_tabs,
             vault_select,
             vault_lock,
-            unlock,
-            unlock_with_recovery,
             lock,
             panic_lock,
             logout,
             delete_account,
             is_unlocked,
-            session_kind,
             list,
             search,
             mkdir,
@@ -1569,14 +1145,6 @@ fn main() {
             preview,
             remove,
             rename,
-            trash_list,
-            trash_restore,
-            trash_delete,
-            trash_empty,
-            keyslots,
-            add_security_key,
-            add_recovery_code,
-            remove_keyslot,
             account,
         ])
         .build(tauri::generate_context!())
@@ -1587,13 +1155,6 @@ fn main() {
             if let RunEvent::Exit = event {
                 let state = app.state::<AppState>();
                 tauri::async_runtime::block_on(async {
-                    if let Some(drive) = wipe_now(&state).await {
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(3),
-                            drive.end_session(),
-                        )
-                        .await;
-                    }
                     for client in wipe_vault(&state).await {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(3),

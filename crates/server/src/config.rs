@@ -11,7 +11,7 @@ pub struct Config {
     #[arg(long, env = "STRONGBOX_LISTEN", default_value = "127.0.0.1:8080")]
     pub listen: SocketAddr,
 
-    /// Directory for the metadata database and blob store.
+    /// Directory for the metadata database and vault block files.
     #[arg(long, env = "STRONGBOX_DATA_DIR", default_value = "./strongbox-data")]
     pub data_dir: PathBuf,
 
@@ -23,15 +23,11 @@ pub struct Config {
     #[arg(long, env = "STRONGBOX_INVITE_TOKEN")]
     pub invite_token: Option<String>,
 
-    /// Per-account storage quota in bytes (padded sizes). Unlimited if unset.
-    #[arg(long, env = "STRONGBOX_QUOTA_BYTES")]
-    pub quota_bytes: Option<u64>,
-
     /// Session lifetime in seconds.
     #[arg(long, env = "STRONGBOX_SESSION_TTL", default_value_t = 12 * 3600)]
     pub session_ttl_secs: i64,
 
-    /// Pre-login requests (keyslot fetch, challenge, session) allowed per IP per minute.
+    /// Pre-login requests (record lookup, challenge, session) allowed per IP per minute.
     #[arg(long, env = "STRONGBOX_PRELOGIN_RATE", default_value_t = 30)]
     pub prelogin_rate_per_minute: u32,
 
@@ -71,14 +67,6 @@ pub struct Config {
         conflicts_with = "drive_size"
     )]
     pub vault_slot_blocks: Option<u32>,
-
-    /// Largest accepted blob (encrypted chunk).
-    #[arg(long, env = "STRONGBOX_MAX_BLOB", default_value_t = 8 * 1024 * 1024)]
-    pub max_blob_size: u64,
-
-    /// Largest accepted sealed node.
-    #[arg(long, env = "STRONGBOX_MAX_NODE", default_value_t = 16 * 1024 * 1024)]
-    pub max_node_size: u64,
 }
 
 /// `16MiB`, `1 GiB`, `512k`, `2G`, `100` (MiB). Binary units.

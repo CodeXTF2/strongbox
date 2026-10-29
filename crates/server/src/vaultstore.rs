@@ -30,6 +30,11 @@ impl VaultStore {
         Ok(VaultStore { root, layout })
     }
 
+    /// Whether the vault's files are on disk.
+    pub fn exists(&self, vault: &str) -> bool {
+        self.dir(vault).is_dir()
+    }
+
     fn dir(&self, vault: &str) -> PathBuf {
         self.root.join(vault)
     }

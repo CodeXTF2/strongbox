@@ -1,5 +1,5 @@
 //! Printable recovery codes: 256 random bits as RFC 4648 base32 in dash-separated groups.
-//! Being full-entropy, a recovery keyslot is no weaker against offline attack than a FIDO one.
+//! Being full-entropy, a recovery code is no weaker against offline attack than a FIDO one.
 
 use rand::RngCore;
 use zeroize::Zeroizing;

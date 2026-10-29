@@ -24,7 +24,7 @@ const prefs = {
 // ---------------------------------------------------------------- state
 
 const state = {
-  view: "drive",          // drive | trash | search
+  view: "drive",          // drive | search
   cwd: [],                // path components while browsing
   query: "",
   entries: [],            // normalized items currently shown (sorted)
@@ -34,7 +34,6 @@ const state = {
   sort: prefs.get("sort", { key: "name", dir: 1 }),
   layout: prefs.get("layout", "list"),
   profile: null,
-  vaultMode: false,
   vaultTabs: [],
   unlocked: false,
   loadSeq: 0,
@@ -88,15 +87,38 @@ function errText(e) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** Plain-language wording for server replies, by what the server said. */
+const SERVER_MESSAGES = [
+  [/storage for this account is missing/i, "This account's files are missing on the server, so its vaults can't be opened. Delete the account (Account security) and create it again, or ask the server's operator to restore the data."],
+  [/out of disk space/i, "The server is out of disk space. Tell its operator, then try again."],
+  [/username taken/i, "That username is already taken. Sign in if it is yours, or choose another."],
+  [/invalid invite token/i, "That invite token is wrong, or this server needs one. Check it with whoever runs the server."],
+  [/registration is closed/i, "This server isn't accepting new accounts."],
+  [/slow down|rate.?limit/i, "Too many attempts. Wait a minute and try again."],
+  [/not whole blocks|block range|too many blocks|malformed|invalid (lookup|id)|must be 32 bytes/i, "The server rejected the request. Update Strongbox, or try again."],
+  [/too many members/i, "This account already has the maximum number of keys and recovery codes. Remove one first."],
+  [/last member|cannot be removed|at least one/i, "An account needs at least one sign-in method. Add another before removing this one."],
+];
+
 /** Friendlier wording for common errors from the Rust side. */
 function friendly(e) {
   const s = errText(e);
-  if (/not registered for the account|UnknownCredential/i.test(s)) return "That security key isn't registered for this account, or the username is wrong.";
+  const api = /^Server error \((\d+)\):\s*([\s\S]*)$/i.exec(s);
+  if (api) {
+    const [, status, msg] = api;
+    for (const [re, text] of SERVER_MESSAGES) if (re.test(msg)) return text;
+    if (status === "401") return "Your session has expired. Sign in again.";
+    if (Number(status) >= 500) return "The server ran into a problem. Try again in a moment, and tell its operator if it keeps happening.";
+    if (status === "404") return "The server couldn't find that. It may have been deleted.";
+    return errText(msg);
+  }
+  if (/could not authenticate|not registered for the account|UnknownCredential/i.test(s)) return "That security key isn't registered for this account, or the username is wrong.";
   if (/operation cancelled|^Cancelled$/i.test(s)) return "Cancelled.";
-  if (/network:|error sending request|connection refused|dns error/i.test(s)) return "Can't reach the server. Check the address and your connection.";
+  if (/network:|error sending request|connection refused|dns error|timed out|timeout/i.test(s)) return "Can't reach the server. Check the address and your connection.";
   if (/rate.?limit|slow down|too many requests/i.test(s)) return "Too many attempts. Wait a minute and try again.";
   if (/decryption failed/i.test(s)) return "That code or password doesn't match this account.";
-  return s;
+  if (/^locked$/i.test(s)) return "Nothing is unlocked. Sign in first.";
+  return s || "Something went wrong. Try again.";
 }
 
 /** invoke() that returns to the lock screen when the server session has expired. */
@@ -250,7 +272,13 @@ function validateName(v, existing = []) {
   return null;
 }
 
-async function showRecoveryCode(code, scope = "drive") {
+/** Name of the vault's root folder in breadcrumbs, move targets and transfer lists. */
+function rootName() {
+  const tab = state.vaultTabs.find((t) => t.active);
+  return tab ? `Vault ${tab.slot}` : "Vault";
+}
+
+async function showRecoveryCode(code, scope = "vault") {
   const accountCode = scope === "account";
   const copyBtn = el("button", {
     type: "button", class: "btn sm", icon: "copy", text: "Copy",
@@ -270,12 +298,12 @@ async function showRecoveryCode(code, scope = "drive") {
     body: [
       el("p", { text: accountCode
         ? "This code signs in to your account if you lose your security keys. It does not unlock any vaults. Write it down and keep it somewhere safe and offline. It won't be shown again."
-        : "This code opens this vault if you lose your security keys. It does not open your other vaults. Write it down and keep it somewhere safe and offline. It won't be shown again." }),
+        : "This code opens this vault if you lose your security keys, and also signs in to your account. It does not open your other vaults. Write it down and keep it somewhere safe and offline. It won't be shown again." }),
       el("div", { class: "code", text: code }),
       el("div", { class: "row gap" }, copyBtn),
       el("div", { class: "callout warn" }, icon("alert"), el("span", { text: accountCode
         ? "Anyone with this code can sign in to your account. Don't store it in a cloud note or email."
-        : "Anyone with this code can open this vault. Don't store it in a cloud note or email." })),
+        : "Anyone with this code can open this vault and sign in to your account. Don't store it in a cloud note or email." })),
       el("label", { class: "check" }, ack, document.createTextNode("I've stored this code safely")),
     ],
     actions: [{ label: "Done", value: true, primary: true }],
@@ -324,7 +352,7 @@ listen("prompt", async (e) => {
 // ---------------------------------------------------------------- views
 
 function showView(name) {
-  for (const v of ["auth", "locked", "drive"]) $(`#view-${v}`).hidden = v !== name;
+  for (const v of ["auth", "drive"]) $(`#view-${v}`).hidden = v !== name;
 }
 
 function avatarFor(target, username) {
@@ -354,8 +382,7 @@ function authTab(which) {
 
 function showAuth(tab = "signin") {
   const last = prefs.get("server", "");
-  for (const f of [$("#signin-form"), $("#setup-form")]) if (!f.server.value) f.server.value = state.profile?.server_url || last;
-  $("#auth-back").hidden = !state.profile;
+  for (const f of [$("#signin-form"), $("#setup-form")]) if (!f.server.value) f.server.value = last;
   showView("auth");
   authTab(tab);
 }
@@ -393,12 +420,6 @@ for (const f of [$("#signin-form"), $("#setup-form")]) {
 $("#tab-signin").addEventListener("click", () => authTab("signin"));
 $("#tab-create").addEventListener("click", () => authTab("create"));
 
-async function vaultCredentials(f = $("#setup-form")) {
-  const problem = checkServer(f) || checkUsername(f);
-  formError(f, problem);
-  return problem ? null : { server: f.server.value.trim(), username: f.username.value };
-}
-
 async function finishVaultEntry() {
   await enterDrive();
   for (const f of [$("#signin-form"), $("#setup-form")]) {
@@ -425,49 +446,57 @@ async function askVaultSlotAndPin(server, { slotTitle = "Vault number", pinTitle
   return { slot: Number(slot), pin };
 }
 
-$("#vault-recover").addEventListener("click", async () => {
+// Sign in with a security key by default; "Use a recovery code instead" swaps the same form
+// into recovery mode so people never fill in the form and then hunt for a second button.
+let recoveryMode = false;
+function setSigninMode(recovery) {
+  recoveryMode = recovery;
   const f = $("#signin-form");
-  const c = await vaultCredentials(f); if (!c) return;
-  const code = await modal({ title: "Open a vault with its recovery code", body: "Enter the code for one vault. This opens only the vault that code belongs to.", input: { type: "password", label: "Vault recovery code", placeholder: "XXXX-XXXX-…" }, validate: v => v.replace(/[\s-]/g, "").length === 52 ? null : "A recovery code has 52 characters." });
-  if (code == null) return;
-  try { await invoke("vault_recover", { ...c, code }); state.vaultMode = true; await finishVaultEntry(); }
-  catch (e) { formError(f, friendly(e)); }
-});
+  $("#recovery-block").hidden = !recovery;
+  f.code.value = "";
+  setCodeKind("account");
+  $("#signin-submit").lastChild.textContent = recovery ? "Sign in with recovery code" : "Sign in with security key";
+  $("#btn-signin-mode").textContent = recovery ? "Use a security key instead" : "Use a recovery code instead";
+  formError(f, "");
+  (!f.server.value ? f.server : !f.username.value ? f.username : recovery ? f.code : f.username).focus();
+}
+$("#btn-signin-mode").addEventListener("click", () => setSigninMode(!recoveryMode));
 
-$("#auth-back").addEventListener("click", () => showLocked());
+// Which kind of recovery code is being entered: an account code signs in to the account only;
+// a vault code also opens that vault.
+let codeKind = "account";
+const CODE_HINTS = {
+  account: "Signs in to your account only. You can then unlock your vaults with your security key.",
+  vault: "Signs in to your account and opens the vault this code belongs to. It does not open your other vaults.",
+};
+function setCodeKind(kind) {
+  codeKind = kind;
+  for (const b of $$("#code-kind button")) b.setAttribute("aria-pressed", String(b.dataset.kind === kind));
+  $("#code-hint").textContent = CODE_HINTS[kind];
+}
+for (const b of $$("#code-kind button")) b.addEventListener("click", () => setCodeKind(b.dataset.kind));
 
 $("#signin-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;
-  const problem = checkServer(f) || checkUsername(f);
+  const problem = checkServer(f) || checkUsername(f)
+    || (recoveryMode && f.code.value.replace(/[\s-]/g, "").length !== 52 ? "A recovery code has 52 characters." : null);
   formError(f, problem);
   if (problem) return;
   const server = f.server.value.trim(), username = f.username.value;
   await busy($("button[type=submit]", f), async () => {
     try {
-      await withKey("Insert your security key, enter its PIN and touch it.", () => invoke("vault_sign_in", { server, username }));
-      state.vaultMode = true;
+      if (recoveryMode) await invoke(codeKind === "vault" ? "vault_recover" : "vault_account_recover", { server, username, code: f.code.value });
+      else await withKey("Insert your security key, enter its PIN and touch it.", () => invoke("vault_sign_in", { server, username }));
+      setSigninMode(false);
       await finishVaultEntry();
-    } catch (e) { formError(f, friendly(e)); }
+    } catch (e) {
+      const m = String(e?.message ?? e);
+      formError(f, recoveryMode && /not an account recovery code/i.test(m) ? "That isn't an account recovery code. If it belongs to a vault, choose “Vault code” above."
+        : recoveryMode && /does not open any drive/i.test(m) ? "That code doesn't open a vault. If it's an account recovery code, choose “Account code” above."
+        : friendly(e));
+    }
   });
-});
-
-$("#btn-signin-account-recovery").addEventListener("click", async () => {
-  const f = $("#signin-form");
-  const c = await vaultCredentials(f);
-  if (!c) return;
-  const code = await modal({
-    title: "Sign in with account recovery code",
-    body: "This code signs in to your account only. It does not unlock a vault.",
-    input: { type: "password", label: "Account recovery code", placeholder: "XXXX-XXXX-…" },
-    validate: v => v.replace(/[\s-]/g, "").length === 52 ? null : "A recovery code has 52 characters.",
-  });
-  if (code == null) return;
-  try {
-    await invoke("vault_account_recover", { ...c, code });
-    state.vaultMode = true;
-    await finishVaultEntry();
-  } catch (e) { formError(f, friendly(e)); }
 });
 
 $("#setup-form").addEventListener("submit", async (ev) => {
@@ -484,90 +513,34 @@ $("#setup-form").addEventListener("submit", async (ev) => {
     try {
       await withKey("Insert your security key and touch it when prompted.", () =>
         invoke("vault_create_account", { server, username, invite, label: label.trim() }));
-      state.vaultMode = true;
+      // Every new account gets a recovery code up front, shown once, so losing the key isn't fatal.
+      let code = null;
+      try { code = await invoke("vault_new_account_recovery", { label: "Recovery code" }); }
+      catch { toast("Account created, but its recovery code couldn't be made. Create one in Settings.", { timeout: 9000 }); }
+      if (code) await showRecoveryCode(code, "account");
       await finishVaultEntry();
     } catch (e) { formError(f, friendly(e)); }
   });
 });
-// ---------------------------------------------------------------- locked
-
-function showLocked() {
-  const p = state.profile;
-  avatarFor($("#locked-avatar"), p.username);
-  $("#locked-user").textContent = p.username;
-  $("#locked-server").textContent = p.server_url;
-  $("#locked-error").hidden = true;
-  showView("locked");
-  $("#btn-unlock").focus();
-}
-
-$("#btn-unlock").addEventListener("click", async () => {
-  $("#locked-error").hidden = true;
-  await busy($("#btn-unlock"), async () => {
-    try {
-      await withKey(null, () => invoke("unlock"));
-      await enterDrive();
-    } catch (e) {
-      $("#locked-error").textContent = friendly(e);
-      $("#locked-error").hidden = false;
-    }
-  });
-});
-
-$("#btn-recovery").addEventListener("click", async () => {
-  const code = await modal({
-    title: "Unlock with recovery code",
-    body: "Enter the recovery code you saved when you set up the drive.",
-    input: { type: "password", placeholder: "XXXX-XXXX-…" },
-    actions: [{ label: "Cancel", value: null }, { label: "Unlock", value: true, primary: true }],
-    validate: (v) => (v.replace(/[\s-]/g, "").length === 52 ? null : "A recovery code has 52 characters."),
-  });
-  if (!code) return;
-  try {
-    await invoke("unlock_with_recovery", { code });
-    await enterDrive();
-    toast("Unlocked with recovery code. If you lost a key, remove it and add a new one in Settings.", { type: "success", timeout: 9000 });
-  } catch (e) {
-    $("#locked-error").textContent = friendly(e);
-    $("#locked-error").hidden = false;
-  }
-});
-
-$("#btn-switch").addEventListener("click", () => showAuth("signin"));
-
 // ---------------------------------------------------------------- drive: entering / locking
 
 async function enterDrive() {
-  state.vaultMode = (await invoke("session_kind")) === "vault";
-  if (state.vaultMode) {
-    const a = await invoke("account");
-    state.profile = { username: a.username, server_url: a.server };
-    state.vaultTabs = await invoke("vault_tabs");
-  } else {
-    state.profile = await invoke("get_profile");
-    state.vaultTabs = [];
-  }
+  const a = await invoke("account");
+  state.profile = { username: a.username, server_url: a.server };
+  state.vaultTabs = await invoke("vault_tabs");
   state.unlocked = true;
   lastActivity = Date.now();
   avatarFor($("#me-avatar"), state.profile.username);
   $("#me-name").textContent = state.profile.username;
   $("#me-server").textContent = state.profile.server_url.replace(/^https?:\/\//, "");
   showView("drive");
-  $("#nav-trash").hidden = state.vaultMode;
-  $("#nav-drive").hidden = state.vaultMode;
-  $("#vault-tabs").hidden = !state.vaultMode;
-  $("#vault-empty-note").hidden = !state.vaultMode || state.vaultTabs.length > 0;
+  $("#vault-empty-note").hidden = state.vaultTabs.length > 0;
   renderVaultTabs();
-  const hasDrive = !state.vaultMode || state.vaultTabs.length > 0;
+  const hasDrive = state.vaultTabs.length > 0;
   $("#search").disabled = !hasDrive;
-  $("#search").placeholder = hasDrive ? (state.vaultMode ? "Search in this vault" : "Search in Drive") : "Unlock a vault to search";
+  $("#search").placeholder = hasDrive ? "Search in this vault" : "Unlock a vault to search";
   $("#btn-new").hidden = !hasDrive;
-  $("#btn-settings").hidden = false;
-  $("#btn-logout").hidden = state.vaultMode;
-  $("#btn-new-vault-drive").hidden = !state.vaultMode;
   $("#btn-new-vault-drive").textContent = state.vaultTabs.length ? "Create another vault..." : "Create a vault...";
-  $("#btn-open-vault-drive").hidden = !state.vaultMode;
-  $("#settings-danger").hidden = false;
   setLayout(state.layout);
   if (hasDrive) {
     await navigate([]);
@@ -582,7 +555,6 @@ async function enterDrive() {
 
 async function lockNow(message) {
   if (!state.unlocked) return;
-  const lockedVault = state.vaultMode;
   state.unlocked = false;
   try { await invoke("lock"); } catch { /* the Rust side drops the keys regardless */ }
   closePreview();
@@ -592,15 +564,15 @@ async function lockNow(message) {
   $("#items").replaceChildren();
   $("#search").value = "";
   transfers.clear();
-  state.profile = lockedVault ? null : await invoke("get_profile");
-  if (state.profile) showLocked(); else showAuth();
+  state.profile = null;
+  showAuth();
   if (message) toast(message);
 }
 
 $("#btn-lock").addEventListener("click", () => lockNow());
 
 $("#btn-new-vault-drive").addEventListener("click", async () => {
-  if (!state.vaultMode || !state.profile) return;
+  if (!state.profile) return;
   if (!(await confirmDialog("Create or reset a vault?", "This permanently replaces the contents of the selected vault number, if it already contains a vault.", "Continue", true))) return;
   let credentials;
   try { credentials = await askVaultSlotAndPin(state.profile.server_url, { slotTitle: "New vault number", pinTitle: "New vault PIN" }); }
@@ -610,11 +582,17 @@ $("#btn-new-vault-drive").addEventListener("click", async () => {
     await withKey("Insert your security key, enter its PIN and touch it.", () =>
       invoke("vault_open", { server: state.profile.server_url, username: state.profile.username, ...credentials, create: true }));
     await enterDrive();
-  } catch (e) { if (state.unlocked) toastError(e); }
+  } catch (e) { if (state.unlocked) toastError(e); return; }
+  // A new vault gets a recovery code straight away, shown once.
+  try {
+    const label = await call("vault_suggest_label", { base: "Recovery code", replacesVaultRecovery: true });
+    await showRecoveryCode(await call("vault_new_recovery", { label }), "vault");
+  }
+  catch { toast("Vault created, but its recovery code couldn't be made. Create one from Manage access.", { timeout: 9000 }); }
 });
 
 $("#btn-open-vault-drive").addEventListener("click", async () => {
-  if (!state.vaultMode || !state.profile) return;
+  if (!state.profile) return;
   let credentials;
   try { credentials = await askVaultSlotAndPin(state.profile.server_url); }
   catch (e) { toastError(e); return; }
@@ -688,6 +666,7 @@ async function renderVaultAccess() {
     el("div", { class: "key-meta" },
       el("div", { class: "key-label", text: key.label }),
       el("div", { class: "key-sub", text: (key.granted ? "Opens this vault" : "Account sign-in only") + (key.current ? " · Current key" : "") })),
+    renameButton(key, renderVaultAccess),
     el("button", {
       class: key.granted ? "btn sm danger-ghost" : "btn sm",
       text: key.granted ? "Revoke" : "Grant",
@@ -722,6 +701,7 @@ async function renderVaultAccess() {
     el("div", { class: "key-meta" },
       el("div", { class: "key-label", text: code.label }),
       el("div", { class: "key-sub", text: "Recovery code · This vault only" + (code.current ? " · Current" : "") })),
+    renameButton(code, renderVaultAccess),
     el("button", {
       class: "btn sm danger-ghost", text: "Remove", disabled: usable <= 1,
       title: usable <= 1 ? "Grant a key or add another recovery method before removing this one" : "",
@@ -736,9 +716,76 @@ async function renderVaultAccess() {
   $("#vault-recovery-list").replaceChildren(...recoveryItems);
 }
 
+/**
+ * Prompt for the name of a key or recovery code. The field is prefilled with `base`, or `base 2`,
+ * `base 3`... when that is taken, and a name already used by another key or recovery code is
+ * refused (ignoring case). `ignoreIds` are members about to be replaced; `prefill` overrides
+ * the suggestion (renaming). Resolves to the trimmed name, or null if cancelled.
+ */
+async function askName(title, base, { ignoreIds = [], replacesVaultRecovery = false, prefill = null } = {}) {
+  let taken, value;
+  try {
+    const [data, suggested] = await Promise.all([
+      call("vault_members"),
+      prefill == null ? call("vault_suggest_label", { base, replacesVaultRecovery }) : null,
+    ]);
+    taken = new Set(data.members.filter((m) => !ignoreIds.includes(m.id)).map((m) => m.label.trim().toLowerCase()));
+    value = prefill ?? suggested;
+  } catch (e) { if (state.unlocked) toastError(e); return null; }
+  const label = await modal({
+    title, input: { label: "Name", value },
+    validate: (v) => !v.trim() || v.trim().length > 80 ? "Enter a name up to 80 characters."
+      : taken.has(v.trim().toLowerCase()) ? "A key or recovery code already has this name." : null,
+  });
+  return label == null ? null : label.trim();
+}
+
+/** A "Rename" button for a key or recovery code row (`item` has id and label). */
+function renameButton(item, refresh) {
+  return el("button", {
+    class: "btn sm ghost", text: "Rename",
+    onclick: async () => {
+      const label = await askName("Rename", item.label, { ignoreIds: [item.id], prefill: item.label });
+      if (label == null || label === item.label) return;
+      try { await call("vault_rename_member", { id: item.id, label }); toast("Renamed.", { type: "success" }); }
+      catch (e) { if (state.unlocked) toastError(e); }
+      await refresh();
+    },
+  });
+}
+
+$("#btn-change-vault-pin").addEventListener("click", async () => {
+  const pin = el("input", { type: "password", autocomplete: "new-password" });
+  const again = el("input", { type: "password", autocomplete: "new-password" });
+  const ok = await modal({
+    title: "Change vault PIN",
+    body: [
+      el("p", { text: "Choose a new PIN for this vault. Your security key will ask for its PIN and a touch. Other security keys that open this vault will lose access until you grant them again with the new PIN. Recovery codes are not affected." }),
+      el("label", { class: "field", text: "New vault PIN" }, pin),
+      el("label", { class: "field", text: "Repeat new PIN" }, again),
+    ],
+    actions: [{ label: "Cancel", value: null }, { label: "Change PIN", value: true, primary: true }],
+  });
+  if (!ok) return;
+  if (pin.value.length < 8) return toast("Use at least 8 characters.", { type: "error" });
+  if (pin.value !== again.value) return toast("The PINs do not match.", { type: "error" });
+  try {
+    const revoked = await withKey("Insert the security key you unlocked this vault with, enter its PIN and touch it.", () =>
+      call("vault_change_pin", { newPin: pin.value }));
+    toast(revoked ? `Vault PIN changed. ${revoked} other key${revoked === 1 ? " lost" : "s lost"} access until granted again.` : "Vault PIN changed.", { type: "success", timeout: 8000 });
+  } catch (e) { if (state.unlocked) toastError(e); }
+  await renderVaultAccess();
+});
+
 $("#vault-access-close").addEventListener("click", () => $("#vault-access").close());
 $("#btn-add-vault-key").addEventListener("click", async () => {
-  const name = el("input", { value: "Security key", spellcheck: false });
+  let taken, suggested;
+  try {
+    const [data, s] = await Promise.all([call("vault_members"), call("vault_suggest_label", { base: "Security key", replacesVaultRecovery: false })]);
+    taken = new Set(data.members.map((m) => m.label.trim().toLowerCase()));
+    suggested = s;
+  } catch (e) { if (state.unlocked) toastError(e); return; }
+  const name = el("input", { value: suggested, spellcheck: false });
   const pin = el("input", { type: "password", autocomplete: "current-password" });
   const ok = await modal({
     title: "Add security key to this vault",
@@ -751,6 +798,7 @@ $("#btn-add-vault-key").addEventListener("click", async () => {
   });
   if (!ok) return;
   if (!name.value.trim() || name.value.trim().length > 80) return toast("Enter a name up to 80 characters.", { type: "error" });
+  if (taken.has(name.value.trim().toLowerCase())) return toast("A key or recovery code already has this name.", { type: "error" });
   if (pin.value.length < 8) return toast("Enter this vault's PIN.", { type: "error" });
   try {
     await withKey("Insert the new security key, enter its key PIN and touch it when prompted.", () =>
@@ -760,14 +808,14 @@ $("#btn-add-vault-key").addEventListener("click", async () => {
   await renderVaultAccess();
 });
 $("#btn-new-vault-recovery").addEventListener("click", async () => {
-  const label = await modal({ title: "Name this vault recovery code", input: { label: "Name", value: "Recovery code" }, validate: v => v.trim() && v.length <= 80 ? null : "Enter a name up to 80 characters." });
-  if (label == null) return;
   let current;
   try { current = await call("vault_drive_access"); }
   catch (e) { if (state.unlocked) toastError(e); return; }
+  const label = await askName("Name this vault recovery code", "Recovery code", { ignoreIds: current.recovery_codes.map((c) => c.id), replacesVaultRecovery: true });
+  if (label == null) return;
   if (current.recovery_codes.length && !(await confirmDialog("Replace this vault's recovery code?", "The previous code will stop opening this vault.", "Replace code", true))) return;
   try {
-    const code = await call("vault_new_recovery", { label: label.trim() });
+    const code = await call("vault_new_recovery", { label });
     await showRecoveryCode(code, "vault");
     await renderVaultAccess();
   } catch (e) { if (state.unlocked) toastError(e); }
@@ -775,34 +823,6 @@ $("#btn-new-vault-recovery").addEventListener("click", async () => {
 
 
 
-/** Lock, then remove the cached account from this device and show the sign-in screen. */
-async function logoutNow() {
-  const ok = await confirmDialog(
-    "Log out?",
-    "This removes the saved account from this device. You'll need your server address and username (and your security key or recovery code) to sign in again. Your files stay on the server.",
-    "Log out", true);
-  if (!ok) return;
-  const wasUnlocked = state.unlocked;
-  state.unlocked = false;
-  try {
-    await invoke("logout");
-  } catch (e) {
-    state.unlocked = wasUnlocked;
-    toastError(e);
-    return;
-  }
-  try { localStorage.removeItem("fd.server"); } catch { /* ignore */ }
-  closePreview();
-  hideMenu();
-  for (const d of $$("dialog[open]")) { d.close(); if (!d.id) d.remove(); }
-  Object.assign(state, { entries: [], selected: new Set(), cwd: [], view: "drive", query: "", profile: null });
-  $("#items").replaceChildren();
-  $("#search").value = "";
-  for (const f of [$("#signin-form"), $("#setup-form")]) f.reset();
-  transfers.clear();
-  showAuth("signin");
-  toast("Logged out. This device no longer remembers the account.", { type: "success" });
-}
 /** Reset the UI to a signed-out state and show the sign-in screen. */
 function resetToSignIn() {
   try { localStorage.removeItem("fd.server"); } catch { /* ignore */ }
@@ -844,8 +864,6 @@ async function deleteAccountNow() {
   toast(`Account “${username}” was deleted.`, { type: "success" });
 }
 $("#btn-delete-account").addEventListener("click", deleteAccountNow);
-$("#btn-logout").addEventListener("click", logoutNow);
-$("#btn-logout-locked").addEventListener("click", logoutNow);
 
 // Auto-lock after inactivity (no lock while transfers are running).
 let lastActivity = Date.now();
@@ -901,21 +919,6 @@ async function navigate(parts, { keepSelection = false, select = null } = {}) {
   refreshUsage();
 }
 
-async function openTrash() {
-  let list;
-  try { list = await load(() => call("trash_list")); } catch (e) { if (state.unlocked) toastError(e); return; }
-  if (list === undefined) return;
-  const changed = state.view !== "trash";
-  state.view = "trash";
-  state.query = "";
-  $("#search").value = "";
-  state.entries = list.map((t) => ({ key: "trash:" + t.id, trashId: t.id, name: t.name, is_dir: t.is_dir, size: t.size, mtime: t.deleted_at, parent: t.parent, path: joinPath(t.parent, t.name) }));
-  if (changed) clearSelection(false);
-  pruneSelection();
-  render();
-  refreshUsage();
-}
-
 async function runSearch(q) {
   state.query = q;
   if (!q.trim()) {
@@ -935,7 +938,6 @@ async function runSearch(q) {
 }
 
 function refresh() {
-  if (state.view === "trash") return openTrash();
   if (state.view === "search") return runSearch(state.query);
   return navigate(state.cwd, { keepSelection: true });
 }
@@ -945,7 +947,7 @@ function refreshUsage() {
   clearTimeout(usageTimer);
   usageTimer = setTimeout(async () => {
     try {
-      if (state.vaultMode && state.vaultTabs.length === 0) {
+      if (state.vaultTabs.length === 0) {
         const fill = $("#usage-fill");
         fill.style.setProperty("width", "0");
         fill.classList.remove("warn", "full");
@@ -981,13 +983,11 @@ function sortEntries() {
 function renderBreadcrumb() {
   const nav = $("#breadcrumb");
   const crumbs = [];
-  if (state.view === "trash") {
-    crumbs.push(el("button", { class: "crumb current", text: "Trash" }));
-  } else if (state.view === "search") {
+  if (state.view === "search") {
     crumbs.push(el("button", { class: "crumb current", text: `Results for “${state.query.trim()}”` }));
   } else {
-    const all = [{ name: "My Drive", parts: [] }, ...state.cwd.map((n, i) => ({ name: n, parts: state.cwd.slice(0, i + 1) }))];
-    // Collapse long paths: My Drive › … › last two.
+    const all = [{ name: rootName(), parts: [] }, ...state.cwd.map((n, i) => ({ name: n, parts: state.cwd.slice(0, i + 1) }))];
+    // Collapse long paths: Vault › … › last two.
     const shown = all.length > 4 ? [all[0], null, ...all.slice(-2)] : all;
     shown.forEach((c, i) => {
       if (i > 0) crumbs.push(el("span", { class: "crumb-sep" }, icon("chevron-right")));
@@ -1011,16 +1011,12 @@ function renderBreadcrumb() {
 function render() {
   sortEntries();
   renderBreadcrumb();
-  $("#nav-drive").classList.toggle("active", state.view === "drive");
-  $("#nav-trash").classList.toggle("active", state.view === "trash");
-  $("#btn-empty-trash").hidden = state.view !== "trash" || state.entries.length === 0;
-  $("#btn-refresh").hidden = state.view === "search" || (state.vaultMode && state.vaultTabs.length === 0);
-  $("#trash-note").hidden = state.view !== "trash" || state.entries.length === 0;
+  $("#btn-refresh").hidden = state.view === "search" || state.vaultTabs.length === 0;
   const content = $("#content");
   content.classList.toggle("with-loc", state.view !== "drive");
   content.classList.toggle("grid-mode", state.layout === "grid");
-  $("#head-loc").textContent = state.view === "trash" ? "Original location" : "Location";
-  $("#head-date").firstChild.textContent = state.view === "trash" ? "Deleted" : "Modified";
+  $("#head-loc").textContent = "Location";
+  $("#head-date").firstChild.textContent = "Modified";
   for (const b of $$(".list-head .sort")) {
     const active = b.dataset.sort === state.sort.key;
     b.classList.toggle("active", active);
@@ -1049,11 +1045,10 @@ function renderEmpty() {
   $("#list-head").hidden = empty;
   if (!empty) return;
   const [ic, title, text] =
-    state.vaultMode && state.vaultTabs.length === 0 ? ["lock", "No vaults unlocked", "Unlock one of your vaults from the sidebar to view its files."]
-    : state.view === "trash" ? ["trash", "Trash is empty", "Items you delete show up here. You can restore them or delete them forever."]
+    state.vaultTabs.length === 0 ? ["lock", "No vaults unlocked", "Unlock one of your vaults from the sidebar to view its files."]
     : state.view === "search" ? ["search-x", "No matches", "No file or folder names contain that text."]
     : state.cwd.length ? ["folder", "This folder is empty", "Drop files here, or use New to upload files or create a folder."]
-    : ["upload", "Welcome to your drive", "Drop files anywhere in this window, or use New → File upload. Everything is encrypted before it leaves this computer."];
+    : ["upload", "This vault is empty", "Drop files anywhere in this window, or use New → File upload. Everything is encrypted before it leaves this computer."];
   $("#empty-icon").replaceChildren(icon(ic));
   $("#empty-title").textContent = title;
   $("#empty-text").textContent = text;
@@ -1077,18 +1072,17 @@ function moreButton(it) {
 
 function locationCell(it) {
   if (state.view === "drive") return el("span", { class: "col-loc" });
-  const label = it.parent === "/" ? "My Drive" : pathParts(it.parent).pop();
+  const label = it.parent === "/" ? rootName() : pathParts(it.parent).pop();
   return el("span", { class: "col-loc" }, el("button", {
-    class: "loc-link", title: it.parent === "/" ? "My Drive" : "My Drive" + it.parent.replaceAll("/", " › "),
+    class: "loc-link", title: it.parent === "/" ? rootName() : rootName() + it.parent.replaceAll("/", " › "),
     onclick: (e) => { e.stopPropagation(); if (state.view === "search") navigate(pathParts(it.parent), { select: it.name }); },
-    disabled: state.view === "trash",
   }, icon("folder"), el("span", { text: label })));
 }
 
 function bindItem(node, it) {
   node.dataset.key = it.key;
   node.setAttribute("role", "option");
-  if (it.is_dir && state.view !== "trash") node.dataset.dropPath = it.path;
+  if (it.is_dir) node.dataset.dropPath = it.path;
   node.classList.toggle("selected", state.selected.has(it.key));
   node.classList.toggle("focused", state.focus === it.key);
   node.addEventListener("click", (e) => clickItem(e, it));
@@ -1222,12 +1216,6 @@ $("#content").addEventListener("click", (e) => {
 
 function actionsFor(items) {
   const one = items.length === 1 ? items[0] : null;
-  if (state.view === "trash") {
-    return [
-      { label: "Restore", icon: "restore", bar: true, fn: () => restoreItems(items) },
-      { label: "Delete forever", icon: "trash", danger: true, bar: true, shortcut: "Del", fn: () => deleteForever(items) },
-    ];
-  }
   const acts = [];
   if (one) acts.push({ label: one.is_dir ? "Open" : "Preview", icon: "open", fn: () => openItem(one), shortcut: "Enter" });
   acts.push({ label: "Download", icon: "download", bar: true, fn: () => downloadItems(items) });
@@ -1235,13 +1223,11 @@ function actionsFor(items) {
   acts.push({ label: "Move to…", icon: "move", bar: true, fn: () => moveItems(items) });
   if (state.view === "search" && one) acts.push({ label: "Show in folder", icon: "folder", fn: () => navigate(pathParts(one.parent), { select: one.name }) });
   acts.push({ sep: true });
-  if (!state.vaultMode) acts.push({ label: "Move to trash", icon: "trash", danger: true, bar: true, shortcut: "Del", fn: () => trashItems(items) });
-  acts.push({ label: state.vaultMode ? "Delete permanently" : "Delete forever", icon: "x", danger: true, shortcut: "Shift+Del", fn: () => deleteForever(items) });
+  acts.push({ label: "Delete permanently", icon: "trash", danger: true, bar: true, shortcut: "Del", fn: () => deleteForever(items) });
   return acts;
 }
 
 async function openItem(it) {
-  if (state.view === "trash") return;
   if (it.is_dir) return navigate(pathParts(it.path));
   return openPreview(it);
 }
@@ -1300,70 +1286,20 @@ async function createFolder() {
   } catch (e) { if (state.unlocked) toastError(e); }
 }
 
-async function trashItems(items) {
-  if (!items.length) return;
-  const ids = [], failures = [];
-  for (const it of items) {
-    try { const id = await call("remove", { path: it.path, permanent: false }); if (id) ids.push(id); } catch (e) { if (!state.unlocked) return; failures.push(`${it.name}: ${friendly(e)}`); }
-  }
-  await refresh();
-  if (ids.length) {
-    toast(ids.length === 1 ? `“${items[0].name}” moved to trash` : `${ids.length} items moved to trash`, {
-      action: { label: "Undo", fn: () => restoreIds(ids) },
-      timeout: 7000,
-    });
-  }
-  if (failures.length) toast(failures.join("\n"), { type: "error" });
-}
-
-async function restoreIds(ids) {
-  let ok = 0;
-  for (const id of ids) {
-    try { await call("trash_restore", { id }); ok++; } catch (e) { if (!state.unlocked) return; toastError(e); }
-  }
-  await refresh();
-  if (ok) toast(ok === 1 ? "Item restored" : `${ok} items restored`, { type: "success" });
-}
-
-async function restoreItems(items) {
-  const paths = [];
-  for (const it of items) {
-    try { paths.push(await call("trash_restore", { id: it.trashId })); } catch (e) { if (!state.unlocked) return; toastError(e); }
-  }
-  await openTrash();
-  if (paths.length) {
-    const target = pathParts(parentOf(paths[0]));
-    toast(paths.length === 1 ? `Restored to ${paths[0]}` : `${paths.length} items restored`, {
-      type: "success", action: { label: "Show", fn: () => navigate(target, { select: baseName(paths[0]) }) },
-    });
-  }
-}
-
 async function deleteForever(items) {
   if (!items.length) return;
   const what = items.length === 1 ? `“${items[0].name}”` : `${items.length} items`;
   const folderNote = items.some((i) => i.is_dir) ? " Folders are deleted with everything inside them." : "";
-  if (!(await confirmDialog("Delete forever?", `${what} will be deleted permanently. This can't be undone.${folderNote}`, "Delete forever", true))) return;
+  if (!(await confirmDialog("Delete permanently?", `${what} will be deleted permanently. This can't be undone.${folderNote}`, "Delete permanently", true))) return;
   for (const it of items) {
     try {
-      if (state.view === "trash") await call("trash_delete", { id: it.trashId });
-      else await call("remove", { path: it.path, permanent: true });
+      await call("remove", { path: it.path });
     } catch (e) { if (!state.unlocked) return; toastError(e); }
   }
   clearSelection(false);
   await refresh();
   refreshUsage();
 }
-
-$("#btn-empty-trash").addEventListener("click", async () => {
-  if (!(await confirmDialog("Empty trash?", "Everything in the trash will be deleted permanently. This can't be undone.", "Empty trash", true))) return;
-  try {
-    const n = await call("trash_empty");
-    toast(`${n} item${n === 1 ? "" : "s"} deleted forever`);
-  } catch (e) { if (state.unlocked) toastError(e); }
-  await openTrash();
-  refreshUsage();
-});
 
 // ---------------------------------------------------------------- move
 
@@ -1380,7 +1316,7 @@ async function moveItemsTo(items, targetParts) {
   }
   await refresh();
   if (ok) {
-    const where = targetParts.length ? targetParts[targetParts.length - 1] : "My Drive";
+    const where = targetParts.length ? targetParts[targetParts.length - 1] : rootName();
     toast(ok === 1 ? `Moved “${movable[0].name}” to ${where}` : `Moved ${ok} items to ${where}`, { action: { label: "Open", fn: () => navigate(targetParts) } });
   }
 }
@@ -1393,7 +1329,7 @@ async function moveItems(items) {
   $("#move-title").textContent = items.length === 1 ? `Move “${items[0].name}”` : `Move ${items.length} items`;
   const show = async () => {
     const where = pathStr(moveState.parts);
-    $("#move-where").textContent = moveState.parts.length ? moveState.parts[moveState.parts.length - 1] : "My Drive";
+    $("#move-where").textContent = moveState.parts.length ? moveState.parts[moveState.parts.length - 1] : rootName();
     $("#move-up").disabled = moveState.parts.length === 0;
     let list = [];
     try { list = await call("list", { path: where }); } catch (e) { if (!state.unlocked) return; toastError(e); }
@@ -1508,7 +1444,7 @@ const transfers = (() => {
     $(".t-bar", r.li).hidden = ev.state !== "active" && ev.state !== "queued";
     const sub = $(".t-sub", r.li);
     sub.classList.toggle("err", ev.state === "error");
-    const where = ev.kind === "upload" ? (ev.target === "/" ? "My Drive" : pathParts(ev.target).pop()) : ev.target;
+    const where = ev.kind === "upload" ? (ev.target === "/" ? rootName() : pathParts(ev.target).pop()) : ev.target;
     sub.textContent =
       ev.state === "queued" ? "Waiting…"
       : ev.state === "active" ? (ev.total ? `${human(ev.done)} of ${human(ev.total)}` : "Starting…")
@@ -1698,11 +1634,6 @@ function newMenuEntries() {
 }
 
 function backgroundMenu(e) {
-  if (state.view === "trash") {
-    if (state.entries.length) showMenu(e, [{ label: "Empty trash", icon: "trash", danger: true, fn: () => $("#btn-empty-trash").click() }]);
-    else e.preventDefault();
-    return;
-  }
   showMenu(e, [...newMenuEntries(), { sep: true }, { label: "Refresh", icon: "refresh", shortcut: "F5", fn: refresh }]);
 }
 
@@ -1713,8 +1644,6 @@ document.addEventListener("contextmenu", (e) => { if (!e.target.closest("input, 
 
 // ---------------------------------------------------------------- nav, search, buttons
 
-$("#nav-drive").addEventListener("click", () => navigate([]));
-$("#nav-trash").addEventListener("click", openTrash);
 $("#btn-refresh").addEventListener("click", refresh);
 
 let searchTimer;
@@ -1769,8 +1698,8 @@ document.addEventListener("keydown", (e) => {
   else if (ctrl && e.key.toLowerCase() === "u") { e.preventDefault(); pickAndUpload(false); }
   else if (ctrl && e.key.toLowerCase() === "a") { e.preventDefault(); state.selected = new Set(state.entries.map((x) => x.key)); updateItemClasses(); }
   else if (e.key === "Escape") { if (sel.length) clearSelection(); else if (state.view === "search") { $("#search").value = ""; runSearch(""); } }
-  else if (e.key === "Delete") { e.preventDefault(); if (state.view === "trash" || e.shiftKey || state.vaultMode) deleteForever(sel); else trashItems(sel); }
-  else if (e.key === "F2" && sel.length === 1 && state.view !== "trash") { e.preventDefault(); renameItem(sel[0]); }
+  else if (e.key === "Delete") { e.preventDefault(); deleteForever(sel); }
+  else if (e.key === "F2" && sel.length === 1) { e.preventDefault(); renameItem(sel[0]); }
   else if (e.key === "Enter" && sel.length === 1) { e.preventDefault(); openItem(sel[0]); }
   else if ((e.key === "Backspace" || (e.altKey && e.key === "ArrowUp")) && state.view === "drive" && state.cwd.length) { e.preventDefault(); navigate(state.cwd.slice(0, -1)); }
   else if (e.key === "ArrowDown") { e.preventDefault(); moveFocus(state.layout === "grid" ? 10 : 1, e.shiftKey); }
@@ -1802,7 +1731,7 @@ function setDropHover(t) {
 }
 
 function startItemDrag(e, it) {
-  if (e.button !== 0 || state.view === "trash" || e.target.closest(".cb, .more-btn, .loc-link")) return;
+  if (e.button !== 0 || e.target.closest(".cb, .more-btn, .loc-link")) return;
   drag = { x: e.clientX, y: e.clientY, it, started: false };
 }
 
@@ -1857,7 +1786,7 @@ function nativeTarget(pos) {
 }
 
 function showDropOverlay(target) {
-  const name = target.parts.length ? target.parts[target.parts.length - 1] : "My Drive";
+  const name = target.parts.length ? target.parts[target.parts.length - 1] : rootName();
   $("#drop-target").textContent = `Files will be encrypted and uploaded to ${name}`;
   $("#drop-overlay").hidden = false;
   setDropHover(target.el);
@@ -1893,65 +1822,32 @@ for (const t of ["dragover", "drop"]) window.addEventListener(t, (e) => e.preven
 // ---------------------------------------------------------------- settings
 
 async function renderKeys() {
-  if (state.vaultMode) {
-    let data;
-    try { data = await call("vault_members"); }
-    catch (e) { if (state.unlocked) toastError(e); return; }
-    const members = data.members.filter((m) => m.slot == null);
-    const items = members.map((m) => el("li", {},
-      el("span", { class: "key-icon" + (m.kind === "recovery_code" ? " rec" : "") }, icon(m.kind === "recovery_code" ? "file-key" : "key")),
-      el("div", { class: "key-meta" },
-        el("div", { class: "key-label", text: m.label }),
-        el("div", { class: "key-sub", text: (m.kind === "recovery_code" ? "Account recovery · Sign-in only" : "Security key · Account sign-in") + (m.current ? " · Current" : "") })),
-      el("button", {
-        class: "btn sm danger-ghost", text: "Remove", disabled: members.length <= 1,
-        title: members.length <= 1 ? "Keep at least one account sign-in method" : "",
-        onclick: async () => {
-          const scope = m.kind === "recovery_code" ? "This account recovery code will no longer sign in to the account." : "This key will no longer sign in to the account or open any of its vaults.";
-          if (!(await confirmDialog("Remove account sign-in method?", scope, "Remove", true))) return;
-          try { await call("vault_remove_member", { id: m.id }); toast("Account sign-in method removed.", { type: "success" }); }
-          catch (e) { if (state.unlocked) toastError(e); }
-          await renderKeys();
-        },
-      })));
-    if (!items.length) items.push(el("li", { class: "key-empty muted", text: "No account sign-in methods." }));
-    $("#keys-list").replaceChildren(...items);
-    return;
-  }
-  let slots;
-  try { slots = await call("keyslots"); } catch (e) { if (state.unlocked) toastError(e); return; }
-  const fidoCount = slots.filter((s) => s.kind !== "recovery").length;
-  const items = slots.map((s) => {
-    const isRec = s.kind === "recovery";
-    const sub = isRec ? "Recovery code" : s.kind === "key+password" ? "Security key + password" : "Security key";
-    return el("li", {},
-      el("span", { class: "key-icon" + (isRec ? " rec" : "") }, icon(isRec ? "file-key" : "key")),
-      el("div", { class: "key-meta" }, el("div", { class: "key-label", text: s.label }), el("div", { class: "key-sub", text: sub })),
-      el("button", {
-        class: "btn sm danger-ghost", text: "Remove", disabled: slots.length <= 1,
-        title: slots.length <= 1 ? "You can't remove the only way to unlock your drive" : "",
-        onclick: async () => {
-          const lastKey = !isRec && fidoCount === 1;
-          const msg = lastKey
-            ? `“${s.label}” is your only security key. After removing it you can only unlock with a recovery code.`
-            : `“${s.label}” will no longer unlock this drive.`;
-          if (!(await confirmDialog("Remove unlock method?", msg, "Remove", true))) return;
-          try { await call("remove_keyslot", { id: s.id }); toast("Removed", { type: "success" }); } catch (e) { if (state.unlocked) toastError(e); }
-          await renderKeys();
-        },
-      }));
-  });
+  let data;
+  try { data = await call("vault_members"); }
+  catch (e) { if (state.unlocked) toastError(e); return; }
+  const members = data.members.filter((m) => m.slot == null);
+  const items = members.map((m) => el("li", {},
+    el("span", { class: "key-icon" + (m.kind === "recovery_code" ? " rec" : "") }, icon(m.kind === "recovery_code" ? "file-key" : "key")),
+    el("div", { class: "key-meta" },
+      el("div", { class: "key-label", text: m.label }),
+      el("div", { class: "key-sub", text: (m.kind === "recovery_code" ? "Account recovery · Sign-in only" : "Security key · Account sign-in") + (m.current ? " · Current" : "") })),
+    renameButton(m, renderKeys),
+    el("button", {
+      class: "btn sm danger-ghost", text: "Remove", disabled: members.length <= 1,
+      title: members.length <= 1 ? "Keep at least one account sign-in method" : "",
+      onclick: async () => {
+        const scope = m.kind === "recovery_code" ? "This account recovery code will no longer sign in to the account." : "This key will no longer sign in to the account or open any of its vaults.";
+        if (!(await confirmDialog("Remove account sign-in method?", scope, "Remove", true))) return;
+        try { await call("vault_remove_member", { id: m.id }); toast("Account sign-in method removed.", { type: "success" }); }
+        catch (e) { if (state.unlocked) toastError(e); }
+        await renderKeys();
+      },
+    })));
+  if (!items.length) items.push(el("li", { class: "key-empty muted", text: "No account sign-in methods." }));
   $("#keys-list").replaceChildren(...items);
 }
 
 $("#btn-settings").addEventListener("click", async () => {
-  $("#settings-title").textContent = state.vaultMode ? "Account security" : "Settings";
-  $("#signin-methods-title").textContent = state.vaultMode ? "Account sign-in" : "Security keys & recovery";
-  $("#signin-methods-note").textContent = state.vaultMode
-    ? "These methods sign in to your account. A security key must also be granted access to each vault you want it to open. Account recovery codes do not unlock vaults."
-    : "Any one of these methods unlocks your drive. Keep a backup method in a safe place.";
-  $("#btn-add-key").lastChild.textContent = state.vaultMode ? "Add backup key" : "Add security key";
-  $("#btn-add-recovery").lastChild.textContent = state.vaultMode ? "New account recovery code" : "New recovery code";
   $("#set-user").textContent = state.profile.username;
   $("#set-server").textContent = state.profile.server_url;
   const a = state.account;
@@ -1971,52 +1867,22 @@ $("#pref-autolock").addEventListener("change", (e) => prefs.set("autolock", Numb
 $("#pref-theme").addEventListener("change", (e) => { prefs.set("theme", e.target.value); applyTheme(); });
 
 $("#btn-add-key").addEventListener("click", async () => {
-  if (state.vaultMode) {
-    const label = await modal({ title: "Name this security key", input: { label: "Name", value: "Backup key" }, validate: v => v.trim() && v.length <= 80 ? null : "Enter a name up to 80 characters." });
-    if (label == null) return;
-    try {
-      await withKey("Insert the backup security key, enter its PIN and touch it.", () => call("vault_add_account_key", { label: label.trim() }));
-      toast("Backup key added for account sign-in. Grant it access from each vault you want it to open.", { type: "success", timeout: 8000 });
-    } catch (e) { if (state.unlocked) toast(friendly(e), { type: "error" }); }
-    await renderKeys();
-    return;
-  }
-  const label = el("input", { value: "Backup key", spellcheck: false });
-  const pw = el("input", { type: "password", autocomplete: "new-password" });
-  const pw2 = el("input", { type: "password", autocomplete: "new-password" });
-  const ok = await modal({
-    title: "Add a security key",
-    body: [
-      el("p", { text: "Insert the new key. You'll enter its PIN and touch it twice." }),
-      el("label", { class: "field", text: "Name" }, label),
-      el("details", { class: "advanced" }, el("summary", { text: "Also require a password" }),
-        el("label", { class: "field", text: "Password" }, pw), el("label", { class: "field", text: "Confirm password" }, pw2)),
-    ],
-    actions: [{ label: "Cancel", value: null }, { label: "Continue", value: true, primary: true }],
-  });
-  if (!ok) return;
-  if (!label.value.trim()) return toast("Give the key a name.", { type: "error" });
-  if (pw.value !== pw2.value) return toast("The passwords don't match.", { type: "error" });
+  const label = await askName("Name this security key", "Backup key");
+  if (label == null) return;
   try {
-    await withKey("Insert the NEW security key, enter its PIN and touch it (twice).", () => call("add_security_key", { label: label.value.trim(), password: pw.value }));
-    toast("Security key added", { type: "success" });
+    await withKey("Insert the backup security key, enter its PIN and touch it.", () => call("vault_add_account_key", { label }));
+    toast("Backup key added for account sign-in. Grant it access from each vault you want it to open.", { type: "success", timeout: 8000 });
   } catch (e) { if (state.unlocked) toast(friendly(e), { type: "error" }); }
   await renderKeys();
 });
 
 $("#btn-add-recovery").addEventListener("click", async () => {
-  let label = null;
-  if (state.vaultMode) {
-    label = await modal({ title: "Name this recovery code", input: { label: "Name", value: "Recovery code" }, validate: v => v.trim() && v.length <= 80 ? null : "Enter a name up to 80 characters." });
-    if (label == null) return;
-  }
-  const message = state.vaultMode
-    ? "This code will sign in to your account only. It will not unlock any drives."
-    : "A new code will be generated. Existing codes keep working until you remove them.";
-  if (!(await confirmDialog(state.vaultMode ? "Create an account recovery code?" : "Create a recovery code?", message, "Create code"))) return;
+  const label = await askName("Name this recovery code", "Recovery code");
+  if (label == null) return;
+  if (!(await confirmDialog("Create an account recovery code?", "This code will sign in to your account only. It will not unlock any vaults.", "Create code"))) return;
   try {
-    const code = await call(state.vaultMode ? "vault_new_account_recovery" : "add_recovery_code", state.vaultMode ? { label: label.trim() } : undefined);
-    await showRecoveryCode(code, state.vaultMode ? "account" : "drive");
+    const code = await call("vault_new_account_recovery", { label });
+    await showRecoveryCode(code, "account");
   } catch (e) { if (state.unlocked) toastError(e); }
   await renderKeys();
 });
@@ -2146,16 +2012,25 @@ document.addEventListener("visibilitychange", () => pressed.clear());
 
 // ---------------------------------------------------------------- start
 
+// Anything that slips past a handler becomes a message, not a silent failure.
+window.addEventListener("unhandledrejection", (ev) => {
+  ev.preventDefault();
+  const msg = String(ev.reason?.message ?? ev.reason ?? "");
+  if (msg.startsWith(SESSION_EXPIRED)) { lockNow("Your session expired. Sign in again."); return; }
+  if (state.unlocked || document.querySelector("#view-auth:not([hidden])")) toastError(ev.reason);
+});
+window.addEventListener("error", (ev) => {
+  if (ev.message && !/ResizeObserver/.test(ev.message)) toast("Something went wrong. Try again.", { type: "error" });
+});
+
 (async () => {
   applyTheme();
   applyIcons();
   if (window.matchMedia) matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
   try {
-    state.profile = await invoke("get_profile");
+    if (await invoke("is_unlocked")) return enterDrive();
   } catch (e) {
     toastError(e);
   }
-  if (state.profile && (await invoke("is_unlocked"))) return enterDrive();
-  if (state.profile) showLocked();
-  else showAuth("create");
+  showAuth("create");
 })();

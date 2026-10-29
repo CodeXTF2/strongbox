@@ -1,11 +1,10 @@
-//! Strongbox server: a blind store for keyslots, sealed nodes and encrypted blobs.
+//! Strongbox server: a blind store for username-sealed account records and fixed-size vault blocks.
 //!
-//! The server never holds a key that decrypts user data. It authenticates accounts with an
-//! Ed25519 key derived client-side from the account master key, enforces optimistic
-//! concurrency on nodes, and stores blobs through a pluggable [`blobstore::BlobStore`].
+//! The server never holds a key that decrypts user data. It authenticates vault members with
+//! Ed25519 keys derived client-side from their security keys, and stores whole fixed-size blocks
+//! without knowing which of them are in use.
 
 pub mod api;
-pub mod blobstore;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -43,9 +42,8 @@ pub fn log_filter(debug: bool) -> String {
 pub struct AppState {
     pub config: Config,
     pub db: db::Db,
-    pub blobs: Arc<dyn blobstore::BlobStore>,
     pub server_id: String,
-    /// Server-local secret for deterministic decoy keyslots (see `api::decoy_keyslots`).
+    /// Server-local secret for deterministic decoy records and blocks (see `api::decoy_bytes`).
     pub decoy_secret: Vec<u8>,
     pub prelogin_limiter: ratelimit::RateLimiter,
     pub vaults: vaultstore::VaultStore,
@@ -160,17 +158,27 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
         })
         .await?;
     let decoy_secret = hex::decode(decoy_secret)?;
-    let blobs: Arc<dyn blobstore::BlobStore> =
-        Arc::new(blobstore::FsBlobStore::new(config.data_dir.join("blobs"))?);
     let layout = vault_layout(&config, &db).await?;
     let vaults = vaultstore::VaultStore::new(config.data_dir.join("vaults"), layout)?;
+    // Accounts whose files are gone (data deleted by hand, an incomplete restore) can still sign
+    // in but can't open a drive. Say so at startup; the count identifies no one.
+    let missing = db
+        .vault_ids()
+        .await?
+        .iter()
+        .filter(|id| !vaults.exists(id))
+        .count();
+    if missing > 0 {
+        tracing::warn!(
+            "{missing} account(s) have no vault storage on disk; their owners can sign in but not open drives, and can delete the account to start over"
+        );
+    }
     let state = Arc::new(AppState {
         vaults,
         vault_sessions: Default::default(),
         prelogin_limiter: ratelimit::RateLimiter::new(config.prelogin_rate_per_minute),
         config,
         db,
-        blobs,
         server_id,
         decoy_secret,
     });
@@ -179,13 +187,6 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(600)).await;
-            if let Err(e) = janitor.db.purge_expired().await {
-                if debug_logging() {
-                    tracing::warn!("purging expired sessions failed: {e}");
-                } else {
-                    tracing::warn!("purging expired sessions failed");
-                }
-            }
             janitor.prelogin_limiter.purge();
             janitor.vault_sessions.purge();
         }

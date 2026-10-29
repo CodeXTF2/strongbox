@@ -13,9 +13,7 @@ use rand::RngCore;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::{
-    prf_salt_to_hmac_salt, Authenticator, CredentialSalt, Error, PrfOutput, PrfPair, Result,
-};
+use crate::{prf_salt_to_hmac_salt, Authenticator, Error, PrfPair, Result};
 
 pub struct SoftAuthenticator {
     path: PathBuf,
@@ -83,20 +81,6 @@ impl Authenticator for SoftAuthenticator {
             credential_id,
             first: Some(out.first),
         })
-    }
-
-    fn prf(&self, _rp_id: &str, creds: &[CredentialSalt]) -> Result<PrfOutput> {
-        let _g = self.lock.lock().unwrap();
-        let state = self.load();
-        for c in creds {
-            if let Some(r) = state.get(&STANDARD.encode(&c.credential_id)) {
-                return Ok(PrfOutput {
-                    credential_id: c.credential_id.clone(),
-                    output: eval(r, &c.prf_salt)?,
-                });
-            }
-        }
-        Err(Error::UnknownCredential)
     }
 
     fn prf2(

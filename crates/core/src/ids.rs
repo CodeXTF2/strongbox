@@ -7,7 +7,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{Error, Result};
 
-/// A random 128-bit identifier for nodes, blobs and keyslots. Serialized as lowercase hex.
+/// A random 128-bit identifier. Serialized as lowercase hex.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id(pub [u8; 16]);
 
