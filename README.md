@@ -34,6 +34,13 @@ The comic below is a useful reminder that encryption cannot solve every part of 
 *Security, [xkcd #538](https://xkcd.com/538/) by Randall Munroe, used under
 [CC BY-NC 2.5](https://creativecommons.org/licenses/by-nc/2.5/).*
 
+## User Interface
+<img width="1762" height="1132" alt="image" src="https://github.com/user-attachments/assets/f2a53135-b783-4252-b731-edd5eaace636" />
+<img width="1756" height="1126" alt="image" src="https://github.com/user-attachments/assets/a8d22905-7beb-424b-8ace-becc02fb01e9" />
+<img width="1756" height="1132" alt="image" src="https://github.com/user-attachments/assets/4d442b0b-c2d1-458d-aca4-9cf6daa3e909" />
+
+
+
 ### Account to drive flow
 
 The two deniable points are shaded: blue for other accounts on the same key, yellow for vault existence.
