@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- Everything runs from these files: no third-party hosts. The page may only talk to its own
+       origin and to a Strongbox server (https, or http on this machine). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src blob:; frame-src blob:; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#14161b" media="(prefers-color-scheme: dark)">
+  <title>Strongbox</title>
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="mobile.css">
+</head>
+<body>
+  <!-- ============ Sign in / create account ============ -->
+  <section id="view-auth" class="auth-view" hidden>
+    <div class="auth-panel">
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span class="wordmark" aria-label="Strongbox">Strong<b>box</b></span></div>
+
+      <div class="segmented" role="tablist" aria-label="Account">
+        <button type="button" role="tab" id="tab-signin" aria-selected="true">Sign in</button>
+        <button type="button" role="tab" id="tab-create" aria-selected="false">Create account</button>
+      </div>
+
+      <form id="signin-form" class="stack" autocomplete="off" novalidate>
+        <div>
+          <h1>Welcome back</h1>
+          <p class="muted">Sign in on this device with an account you already created.</p>
+        </div>
+        <label class="field">Server
+          <input name="server" type="url" required placeholder="https://drive.example.org" spellcheck="false">
+        </label>
+        <label class="field">Username
+          <input name="username" type="password" required autocomplete="off" spellcheck="false" autocapitalize="off">
+        </label>
+        <div class="stack" id="recovery-block" hidden>
+          <div class="segmented" id="code-kind" role="group" aria-label="Recovery code type">
+            <button type="button" data-kind="account" aria-pressed="true">Account code</button>
+            <button type="button" data-kind="vault" aria-pressed="false">Vault code</button>
+          </div>
+          <label class="field">Recovery code
+            <input name="code" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="XXXX-XXXX-…">
+            <span class="hint" id="code-hint"></span>
+          </label>
+        </div>
+        <p class="form-error" hidden></p>
+        <button class="btn primary lg" type="submit" data-icon="key" id="signin-submit">Sign in with security key</button>
+        <button class="btn link" type="button" id="btn-signin-mode">Use a recovery code instead</button>
+      </form>
+
+      <form id="setup-form" class="stack" autocomplete="off" novalidate hidden>
+        <div>
+          <h1>Create account</h1>
+          <p class="muted">Create your account and sign-in key. You'll get a recovery code to save, and can create or unlock vaults after signing in.</p>
+        </div>
+        <label class="field">Server
+          <input name="server" type="url" required placeholder="https://drive.example.org" spellcheck="false">
+        </label>
+        <label class="field">Username
+          <input name="username" type="password" required autocomplete="off" spellcheck="false" autocapitalize="off">
+          <span class="hint">3-64 characters: letters a-z, numbers 0-9, dot, dash or underscore.</span>
+        </label>
+        <label class="field">Invite token <span class="optional">if the server requires one</span>
+          <input name="invite" spellcheck="false">
+        </label>
+        <p class="form-error" hidden></p>
+        <button class="btn primary lg" type="submit" data-icon="key">Create account</button>
+        <p class="hint center">You'll enter your security key's PIN and touch it when prompted.</p>
+      </form>
+
+    </div>
+    <div class="auth-art" aria-hidden="true">
+      <i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i>
+      <div class="art-card">
+        <div class="art-badge" data-icon="shield"></div>
+        <h2>Private by design</h2>
+        <ul>
+          <li><span data-icon="laptop"></span>Unencrypted data never leaves your device</li>
+          <li><span data-icon="key"></span>Unlocked only by your security key + PIN</li>
+          <li><span data-icon="eye-off"></span>The server never sees names, folders or contents</li>
+          <li><span data-icon="shield"></span>Secure and fully deniable</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Drive ============ -->
+  <section id="view-drive" class="drive-view" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span class="wordmark" aria-label="Strongbox">Strong<b>box</b></span></div>
+      <button class="btn new-btn" id="btn-new" data-icon="plus">New</button>
+      <button class="btn ghost" id="btn-new-vault-drive">Create another vault...</button>
+      <button class="btn ghost" id="btn-open-vault-drive">Unlock another vault...</button>
+      <nav class="nav" aria-label="Places">
+        <div id="vault-tabs" class="vault-tabs" role="tablist" aria-label="Unlocked vaults"></div>
+        <div id="vault-empty-note" class="vault-empty-note muted" hidden>No vaults unlocked</div>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="storage">
+        <div class="storage-row"><span data-icon="cloud"></span><span>Storage</span></div>
+        <div class="meter"><div class="meter-fill" id="usage-fill"></div></div>
+        <div class="storage-text muted" id="usage-text">-</div>
+      </div>
+      <div class="account-chip">
+        <div class="avatar" id="me-avatar"></div>
+        <div class="account-meta">
+          <div class="account-name" id="me-name"></div>
+          <div class="account-server muted" id="me-server"></div>
+        </div>
+        <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings" data-icon="settings"></button>
+        <button class="icon-btn" id="btn-lock" title="Lock (Ctrl+L)" aria-label="Lock" data-icon="lock"></button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn nav-toggle" id="btn-nav" type="button" title="Menu" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button>
+        <div class="search">
+          <span class="search-icon" data-icon="search"></span>
+          <input id="search" type="search" placeholder="Search in this vault" spellcheck="false" autocomplete="off" aria-label="Search">
+          <kbd class="search-kbd">Ctrl K</kbd>
+        </div>
+        <div class="selection-bar" id="selection-bar" hidden>
+          <button class="icon-btn" id="sel-clear" title="Clear selection (Esc)" aria-label="Clear selection" data-icon="x"></button>
+          <span id="sel-count"></span>
+          <div class="selection-actions" id="sel-actions"></div>
+        </div>
+        <div class="topbar-actions">
+          <div class="segmented small" role="group" aria-label="Layout">
+            <button type="button" id="view-list" title="List view" aria-label="List view" data-icon="list"></button>
+            <button type="button" id="view-grid" title="Grid view" aria-label="Grid view" data-icon="grid"></button>
+          </div>
+        </div>
+      </header>
+
+      <div class="pathbar">
+        <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
+        <div class="pathbar-actions" id="folder-actions">
+          <button class="btn ghost sm" id="btn-refresh" title="Refresh (F5)" data-icon="refresh">Refresh</button>
+        </div>
+      </div>
+
+      <div class="content" id="content" tabindex="0">
+        <div class="list-head" id="list-head">
+          <span class="col-check"><span class="cb" id="select-all" role="checkbox" aria-checked="false" aria-label="Select all" tabindex="0"></span></span>
+          <button class="col-name sort" data-sort="name">Name</button>
+          <span class="col-loc" id="head-loc">Location</span>
+          <button class="col-date sort" data-sort="mtime" id="head-date">Modified</button>
+          <button class="col-size sort" data-sort="size">Size</button>
+          <span class="col-more"></span>
+        </div>
+        <div id="items" class="items list" role="listbox" aria-multiselectable="true"></div>
+        <div id="empty" class="empty" hidden>
+          <div class="empty-art" id="empty-icon"></div>
+          <h3 id="empty-title"></h3>
+          <p class="muted" id="empty-text"></p>
+        </div>
+        <div id="loading" class="loading" hidden><span class="spinner"></span></div>
+      </div>
+
+      <button class="fab" id="btn-fab-new" type="button" title="New" aria-label="New" data-icon="plus" hidden></button>
+
+      <div id="drop-overlay" class="drop-overlay" hidden>
+        <div class="drop-card">
+          <div class="drop-icon" data-icon="upload"></div>
+          <div class="drop-title">Drop to upload</div>
+          <div class="drop-sub" id="drop-target"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="nav-scrim" class="nav-scrim" hidden></div>
+
+  <!-- ============ Floating UI ============ -->
+  <div id="menu" class="menu" role="menu" hidden></div>
+
+  <div id="transfers" class="transfers" hidden>
+    <div class="transfers-head">
+      <span id="transfers-title"></span>
+      <button class="icon-btn" id="transfers-toggle" aria-label="Collapse" data-icon="chevron-down"></button>
+      <button class="icon-btn" id="transfers-close" aria-label="Close" data-icon="x"></button>
+    </div>
+    <div class="transfers-sub" id="transfers-sub">
+      <span id="transfers-summary" class="muted"></span>
+      <button class="btn link sm" id="transfers-cancel">Cancel all</button>
+    </div>
+    <ul class="transfers-list" id="transfers-list"></ul>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <div id="drag-ghost" class="drag-ghost" hidden></div>
+
+  <div id="keywait" class="keywait" hidden>
+    <div class="keywait-card">
+      <div class="keywait-icon" data-icon="key"></div>
+      <div class="keywait-title">Waiting for your security key</div>
+      <div class="keywait-text muted" id="keywait-text">Insert it, enter its PIN and touch it when it blinks.</div>
+    </div>
+  </div>
+
+  <!-- Move to folder -->
+  <dialog id="move-dialog" class="dialog wide">
+    <h2 id="move-title">Move</h2>
+    <div class="move-path">
+      <button class="icon-btn" id="move-up" aria-label="Up one folder" data-icon="arrow-up"></button>
+      <span id="move-where"></span>
+    </div>
+    <ul class="move-list" id="move-list"></ul>
+    <div class="dialog-actions">
+      <button class="btn ghost" type="button" id="move-newfolder" data-icon="folder-plus">New folder</button>
+      <span class="grow"></span>
+      <button class="btn" type="button" id="move-cancel">Cancel</button>
+      <button class="btn primary" type="button" id="move-ok">Move here</button>
+    </div>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settings" class="dialog wide">
+    <div class="dialog-head">
+      <h2 id="settings-title">Account security</h2>
+      <button class="icon-btn" id="settings-close" aria-label="Close" data-icon="x"></button>
+    </div>
+    <div class="settings-body">
+      <section>
+        <h3>Account</h3>
+        <dl class="kv">
+          <dt>Username</dt><dd id="set-user"></dd>
+          <dt>Server</dt><dd id="set-server"></dd>
+          <dt>Storage used</dt><dd id="set-usage"></dd>
+        </dl>
+      </section>
+      <section>
+        <div class="section-head">
+          <h3 id="signin-methods-title">Account sign-in</h3>
+        </div>
+        <p class="muted small" id="signin-methods-note">These methods sign in to your account. A security key must also be granted access to each vault you want it to open. Account recovery codes do not unlock vaults.</p>
+        <ul class="key-list" id="keys-list"></ul>
+        <div class="row gap">
+          <button class="btn" id="btn-add-key" data-icon="plus">Add backup key</button>
+          <button class="btn ghost" id="btn-add-recovery" data-icon="file-key">New account recovery code</button>
+        </div>
+      </section>
+      <section>
+        <h3>Preferences</h3>
+        <label class="field inline">Lock automatically when idle
+          <select id="pref-autolock">
+            <option value="0">Never</option>
+            <option value="5">After 5 minutes</option>
+            <option value="15">After 15 minutes</option>
+            <option value="30">After 30 minutes</option>
+            <option value="60">After 1 hour</option>
+          </select>
+        </label>
+        <div class="field inline panic-row">
+          <div>
+            <div>Panic key</div>
+            <div class="hint">Instantly locks all vaults and wipes all keys from memory. Works while this window is focused.</div>
+          </div>
+          <div class="row gap">
+            <span id="panic-combo" class="combo">Not set</span>
+            <button type="button" class="btn sm" id="panic-record">Set...</button>
+            <button type="button" class="btn sm ghost" id="panic-clear" hidden>Clear</button>
+          </div>
+        </div>
+        <label class="field inline">Theme
+          <select id="pref-theme">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+      </section>
+      <section id="settings-danger">
+        <h3>Danger zone</h3>
+        <div class="field inline panic-row">
+          <div>
+            <div>Delete account</div>
+            <div class="hint">Permanently deletes your account, all vaults, keys and files from the server, and frees the username. This can't be undone.</div>
+          </div>
+          <button type="button" class="btn sm danger-ghost" id="btn-delete-account">Delete account...</button>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
+  <dialog id="vault-access" class="dialog">
+    <div class="dialog-head">
+      <div>
+        <h2>Vault access</h2>
+        <div id="vault-access-title" class="muted small"></div>
+      </div>
+      <button class="icon-btn" id="vault-access-close" aria-label="Close" data-icon="x"></button>
+    </div>
+    <div class="settings-body">
+      <section>
+        <h3>Security keys</h3>
+        <p class="muted small">Account keys can sign in, but only keys listed as able to open this vault can unlock its data.</p>
+        <ul class="key-list" id="vault-access-keys"></ul>
+        <div class="btn-row">
+          <button class="btn" id="btn-add-vault-key" data-icon="plus">Add security key to this vault</button>
+          <button class="btn ghost" id="btn-change-vault-pin" data-icon="key">Change vault PIN</button>
+        </div>
+      </section>
+      <section>
+        <h3>Recovery codes for this vault</h3>
+        <p class="muted small">Each code opens this vault only. It also signs in to your account, but does not open your other vaults.</p>
+        <ul class="key-list" id="vault-recovery-list"></ul>
+        <div><button class="btn ghost" id="btn-new-vault-recovery" data-icon="file-key">Create vault recovery code</button></div>
+      </section>
+    </div>
+  </dialog>
+
+  <!-- Preview -->
+  <div id="preview" class="preview" hidden>
+    <header class="preview-head">
+      <button class="icon-btn on-dark" id="preview-close" aria-label="Close (Esc)" data-icon="arrow-left"></button>
+      <span class="preview-icon" id="preview-icon"></span>
+      <span class="preview-name" id="preview-name"></span>
+      <span class="grow"></span>
+      <button class="btn on-dark" id="preview-download" data-icon="download">Download</button>
+    </header>
+    <div class="preview-stage" id="preview-stage"></div>
+    <button class="preview-nav prev on-dark" id="preview-prev" aria-label="Previous" data-icon="chevron-left"></button>
+    <button class="preview-nav next on-dark" id="preview-next" aria-label="Next" data-icon="chevron-right"></button>
+  </div>
+
+  <script src="icons.js"></script>
+  <script type="module" src="bridge.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
+

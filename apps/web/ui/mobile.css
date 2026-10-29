@@ -1,0 +1,123 @@
+/* Phones and touch screens. style.css is the desktop app's stylesheet, unchanged; everything
+   the web client adds for small screens and touch lives here. Desktop-sized windows look and
+   behave exactly like the desktop app. */
+
+.nav-toggle, .fab, .nav-scrim { display: none; }
+
+/* ---------- Touch input (any size): no hover, bigger targets ---------- */
+@media (pointer: coarse) {
+  /* Checkboxes and the "more" button are hover-revealed on desktop: always show them. */
+  .cb, .more-btn { opacity: 1; }
+  .cb { width: 22px; height: 22px; border-radius: 6px; }
+  .icon-btn { width: 40px; height: 40px; }
+  .menu-item { padding: 12px 14px; }
+  .menu-item .shortcut, .search-kbd { display: none; }
+  .item.row-item { height: 56px; }
+  .vault-tab-lock, .vault-tab-access { flex-basis: 40px; width: 40px; height: 40px; }
+  /* Long-press shows our menu, not the browser's text selection. */
+  .item { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  * { -webkit-tap-highlight-color: transparent; }
+}
+
+/* ---------- Phones ---------- */
+@media (max-width: 720px) {
+  html, body { height: 100dvh; }
+  /* iOS zooms into inputs under 16px. */
+  input, select, textarea { font-size: 16px; }
+
+  /* Sign-in: the art panel is already hidden below 900px; tighten the form. */
+  .auth-panel { padding: max(20px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); border-right: none; }
+  .auth-panel form, .auth-panel .segmented { max-width: none; }
+  h1 { font-size: 22px; }
+
+  /* Sidebar becomes an off-canvas drawer. */
+  .drive-view { grid-template-columns: 1fr; }
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 90;
+    width: min(300px, 86vw);
+    padding: max(18px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    overflow-y: auto; overscroll-behavior: contain;
+    transform: translateX(-102%); transition: transform .22s ease; box-shadow: var(--shadow-lg);
+    visibility: hidden;
+  }
+  .drive-view.nav-open .sidebar { transform: none; visibility: visible; }
+  .nav-scrim { display: block; position: fixed; inset: 0; z-index: 85; background: rgb(0 0 0 / 38%); animation: fade .18s ease-out; }
+  .nav-scrim[hidden] { display: none; }
+  /* Undo the 980px icon rail inside the drawer: full labels again. */
+  .sidebar .brand span:last-child, .new-btn, .nav-item { font-size: inherit; }
+  .nav-item { justify-content: flex-start; padding: 10px 14px; }
+  .storage, .account-meta { display: block; }
+  .account-chip { flex-direction: row; border-top: 1px solid var(--border); }
+  /* "New" lives on the floating button instead. */
+  .sidebar .new-btn { display: none; }
+
+  .nav-toggle { display: inline-grid; margin-left: -6px; }
+  .topbar { gap: 8px; padding: max(10px, env(safe-area-inset-top)) 12px 6px; }
+  .search input { padding: 10px 14px 10px 40px; font-size: 16px; }
+  .search-icon { left: 13px; }
+  .topbar-actions { margin-left: 0; }
+
+  /* While items are selected the bar spans the top; actions show as icons only. */
+  .selection-bar { padding: 4px; gap: 2px; }
+  .topbar:has(.selection-bar:not([hidden])) .topbar-actions,
+  .topbar:has(.selection-bar:not([hidden])) .nav-toggle { display: none; }
+  #sel-count { margin: 0 4px; font-size: 13px; }
+  .selection-actions { margin-left: auto; }
+  .selection-actions .btn { padding: 8px; min-width: 40px; justify-content: center; }
+  .selection-actions .btn span { display: none; }
+
+  .pathbar { min-height: 44px; padding: 0 12px 4px; }
+  .crumb { font-size: 17px; padding: 4px 8px; max-width: 40vw; }
+  .crumb.current { max-width: 60vw; }
+  #btn-refresh { font-size: 0; gap: 0; padding: 8px; }
+
+  .content { padding: 0 4px calc(96px + env(safe-area-inset-bottom) + var(--transfers-h, 0px)); }
+  .list-head, .item.row-item,
+  .content.with-loc .list-head, .content.with-loc .item.row-item { grid-template-columns: 34px minmax(0, 1fr) 72px 40px; gap: 6px; }
+  .col-date, .content.with-loc .col-loc { display: none; }
+  .items.grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; padding: 10px 6px; }
+  .card-thumb { height: 84px; }
+  .card .cb { top: 14px; left: 14px; }
+  .empty { padding: 48px 20px; }
+
+  .fab {
+    display: grid; place-items: center; position: absolute; z-index: 30;
+    right: max(18px, env(safe-area-inset-right)); bottom: calc(max(18px, env(safe-area-inset-bottom)) + var(--transfers-h, 0px));
+    transition: bottom .18s ease;
+    width: 56px; height: 56px; border: none; border-radius: 18px;
+    background: var(--accent); color: var(--accent-text); box-shadow: var(--shadow-lg); cursor: pointer;
+  }
+  .fab[hidden] { display: none; }
+  .fab svg.ic { width: 26px; height: 26px; stroke-width: 2.2; }
+  .fab:active { transform: scale(.96); }
+
+  /* Menus open as a bottom sheet: easy to reach with a thumb, never off-screen. */
+  .menu {
+    left: 8px !important; right: 8px; top: auto !important;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    max-height: 70dvh; overflow-y: auto; border-radius: 16px; animation: rise .16s ease-out;
+  }
+
+  /* Transfers dock to the bottom edge; the New button and toasts move up above them. */
+  .transfers { left: 8px; right: 8px; width: auto; bottom: max(8px, env(safe-area-inset-bottom)); max-height: 45dvh; }
+  .toasts { width: calc(100vw - 24px); bottom: calc(88px + env(safe-area-inset-bottom) + var(--transfers-h, 0px)); }
+  .toast { max-width: 100%; }
+
+  /* Dialogs: full width, scroll inside, buttons easy to hit. */
+  dialog.dialog, dialog.dialog.wide { width: calc(100vw - 24px); max-width: none; max-height: calc(100dvh - 24px); overflow-y: auto; padding: 20px 18px; }
+  .dialog-actions { flex-wrap: wrap; }
+  .dialog-actions .btn { flex: 1 1 auto; justify-content: center; min-height: 44px; }
+  .kv { grid-template-columns: 1fr; gap: 2px 0; }
+  .kv dd { margin: 0 0 8px; }
+
+  /* Preview: edge to edge, arrows at the bottom (swipe also works). */
+  .preview-head { padding: max(8px, env(safe-area-inset-top)) 8px 8px 12px; }
+  .preview-stage { padding: 8px 8px calc(72px + env(safe-area-inset-bottom)); }
+  .preview-stage pre { padding: 14px; font-size: 12.5px; }
+  .preview-nav { top: auto; bottom: max(14px, env(safe-area-inset-bottom)); transform: none; }
+  .preview-nav.prev { left: calc(50% - 56px); }
+  .preview-nav.next { right: calc(50% - 56px); }
+}
+
+@keyframes fade { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }

@@ -1,0 +1,17 @@
+{
+  "name": "strongbox-web-vendor",
+  "private": true,
+  "description": "Builds ui/vendor.js: the audited @noble crypto libraries bundled into one local file, so the page loads nothing from third-party hosts.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --format=esm --target=es2022 --legal-comments=inline --outfile=../ui/vendor.js"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
