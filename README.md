@@ -64,15 +64,17 @@ flowchart TD
 - **Account existence:** not deniable. Registration reveals whether a username is taken, so anyone
   who can try names can confirm that an account exists. Keep registration invite-only.
 - **Other accounts on the same key:** the deniable part, under two threat models.
-  - *Unprivileged attacker (brute-forcing usernames):* holds the server snapshot, the key and its PIN,
-    but not the usernames. The server stores no usernames, only Argon2id-derived lookup ids, and an
-    unknown username gets a decoy record of the same size. The credentials are non-discoverable, so the
-    key lists nothing. Matching the key means guessing usernames offline, one Argon2id computation per
-    guess, then testing each candidate credential on the key. A guessable username makes this quick.
-  - *Hostile operator with the username list:* holds the same material plus every username. There is
-    no guessing: each account costs one Argon2id run and one touch on the key. Matching all accounts
-    is linear in their number (about one touch each, so hours at thousands of accounts and days at a
-    million). It is slow but not infeasible, and the touch requirement does not change that.
+  - *Seized server, plus key and PIN:* the attacker has the server snapshot. The server stores no
+    usernames, only Argon2id-derived lookup ids and records encrypted under keys derived from the
+    username. Matching the key means guessing usernames offline: for each candidate, one Argon2id
+    run (64 MiB), decrypt the record to get its credential ids, then test them on the key (one
+    touch). A candidate absent from the lookup table is discarded without touching the key. The
+    credentials are non-discoverable, so the key lists nothing. If the attacker already holds the
+    username list, no guessing is needed: each account costs one Argon2id run and one touch, which
+    is linear in the number of accounts. That is slow at scale but not infeasible.
+  - *Key and PIN only, no server access:* the attacker cannot match the key to any account. The
+    credentials are non-discoverable, so the key lists nothing, and without the records there are
+    no credential ids to test.
 - **Vault existence:** a wrong drive PIN and an unused slot give the same result, message and
   timing, and every slot is filled with random bytes at creation, so used and unused slots look alike.
 

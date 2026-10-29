@@ -23,12 +23,14 @@ has created *k* drives from one where they have created *k + j* drives, for any 
 cannot open a drive without its drive PIN except by guessing it through the physical key.
 Likewise for usernames, under two threat models:
 
-- **Unprivileged adversary** (no usernames): cannot tell how many usernames (vaults) the key
-  serves, nor find one without guessing its username offline (one Argon2id run per guess).
-- **Hostile operator with the username list:** no guessing is needed. Each account costs one
+- **Seized server, plus key and PIN:** cannot tell how many usernames (vaults) the key serves,
+  nor find one without guessing its username offline (one Argon2id run per guess). If the
+  attacker already holds the username list, no guessing is needed: each account costs one
   Argon2id run and one touch on the key, so matching all accounts is linear in their number.
   It is slow at scale but not infeasible, and the touch requirement does not change that. The
-  guarantee against this operator is only time, not secrecy.
+  guarantee against this attacker is only time, not secrecy.
+- **Key and PIN only, no server access:** cannot match the key to any account. The key lists
+  nothing (non-discoverable credentials), and there are no credential ids to test.
 
 **Explicitly out of scope** (stated so nobody relies on them):
 
