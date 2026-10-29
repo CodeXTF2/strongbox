@@ -31,6 +31,7 @@ async fn start_server(data_dir: &Path) -> String {
         vault_slots: Some(2),
         vault_slot_blocks: Some(16),
         drive_size: None,
+        spare_vaults: 0,
     };
     let app = strongbox_server::build(config).await.unwrap();
     serve(app).await

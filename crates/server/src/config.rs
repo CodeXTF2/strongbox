@@ -65,6 +65,12 @@ pub struct Config {
     #[arg(long = "drive-size", env = "STRONGBOX_DRIVE_SIZE", value_parser = parse_size)]
     pub drive_size: Option<u64>,
 
+    /// Vaults to keep filled in advance. Sign-up then moves a ready one into place instead of
+    /// writing a whole vault of random bytes while the client waits. Each spare takes the disk
+    /// of one vault; 0 fills every vault at sign-up.
+    #[arg(long, env = "STRONGBOX_SPARE_VAULTS", default_value_t = 1)]
+    pub spare_vaults: usize,
+
     /// Drive size in 256 KiB blocks (alternative to --drive-size).
     #[arg(
         long,

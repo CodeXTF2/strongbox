@@ -77,6 +77,23 @@ pub fn open_message(key: &Key, sid: &[u8], counter: u64, ct: &[u8]) -> Result<Ve
     aead::open_with_nonce(key, &nonce(counter), &message_aad(sid, counter), ct)
 }
 
+/// [`seal_message`] in place: `buf[start..]` becomes the sealed message (block transfers are
+/// megabytes, so the copying versions would hold several copies of each in memory).
+pub fn seal_message_in_place(key: &Key, sid: &[u8], counter: u64, buf: &mut Vec<u8>, start: usize) {
+    aead::seal_in_place_with_nonce(key, &nonce(counter), &message_aad(sid, counter), buf, start)
+}
+
+/// [`open_message`] in place: on success `buf[start..]` is the plaintext.
+pub fn open_message_in_place(
+    key: &Key,
+    sid: &[u8],
+    counter: u64,
+    buf: &mut Vec<u8>,
+    start: usize,
+) -> Result<()> {
+    aead::open_in_place_with_nonce(key, &nonce(counter), &message_aad(sid, counter), buf, start)
+}
+
 /// Sliding window over accepted counters (as in IPsec/DTLS): each counter is accepted once,
 /// and counters more than [`REPLAY_WINDOW`] behind the newest are refused. Counters start at 1.
 pub struct ReplayWindow {
@@ -161,24 +178,32 @@ pub struct InnerRequest {
     pub body: Vec<u8>,
 }
 
-pub fn encode_request(r: &InnerRequest) -> Vec<u8> {
-    let code = match r.method {
+/// A request without its body, which follows the head directly (see [`encode_request_head`]).
+#[derive(Debug, PartialEq, Eq)]
+pub struct RequestHead {
+    pub method: Method,
+    pub json: bool,
+    pub path: String,
+    pub token: String,
+}
+
+/// Append the framing that precedes a request body to `out`; the body goes right after it.
+pub fn encode_request_head(h: &RequestHead, out: &mut Vec<u8>) {
+    let code = match h.method {
         Method::Get => 0u8,
         Method::Post => 1,
         Method::Put => 2,
         Method::Delete => 3,
-    } | if r.json { JSON_FLAG } else { 0 };
-    let mut out = Vec::with_capacity(5 + r.path.len() + r.token.len() + r.body.len());
+    } | if h.json { JSON_FLAG } else { 0 };
     out.push(code);
-    out.extend_from_slice(&(r.path.len() as u16).to_be_bytes());
-    out.extend_from_slice(r.path.as_bytes());
-    out.extend_from_slice(&(r.token.len() as u16).to_be_bytes());
-    out.extend_from_slice(r.token.as_bytes());
-    out.extend_from_slice(&r.body);
-    out
+    out.extend_from_slice(&(h.path.len() as u16).to_be_bytes());
+    out.extend_from_slice(h.path.as_bytes());
+    out.extend_from_slice(&(h.token.len() as u16).to_be_bytes());
+    out.extend_from_slice(h.token.as_bytes());
 }
 
-pub fn decode_request(data: &[u8]) -> Result<InnerRequest> {
+/// The head of a framed request and the offset of its body in `data`.
+pub fn decode_request_head(data: &[u8]) -> Result<(RequestHead, usize)> {
     let bad = || Error::Malformed("channel request");
     let code = *data.first().ok_or_else(bad)?;
     let method = match code & !JSON_FLAG {
@@ -188,22 +213,49 @@ pub fn decode_request(data: &[u8]) -> Result<InnerRequest> {
         3 => Method::Delete,
         _ => return Err(bad()),
     };
-    let mut rest = &data[1..];
-    let field = |rest: &mut &[u8]| -> Result<String> {
-        let len = u16::from_be_bytes(rest.get(..2).ok_or_else(bad)?.try_into().unwrap()) as usize;
-        let s = rest.get(2..2 + len).ok_or_else(bad)?;
+    let mut at = 1;
+    let mut field = || -> Result<String> {
+        let len =
+            u16::from_be_bytes(data.get(at..at + 2).ok_or_else(bad)?.try_into().unwrap()) as usize;
+        let s = data.get(at + 2..at + 2 + len).ok_or_else(bad)?;
         let s = String::from_utf8(s.to_vec()).map_err(|_| bad())?;
-        *rest = &rest[2 + len..];
+        at += 2 + len;
         Ok(s)
     };
-    let path = field(&mut rest)?;
-    let token = field(&mut rest)?;
-    Ok(InnerRequest {
+    let path = field()?;
+    let token = field()?;
+    let head = RequestHead {
         method,
         json: code & JSON_FLAG != 0,
         path,
         token,
-        body: rest.to_vec(),
+    };
+    Ok((head, at))
+}
+
+pub fn encode_request(r: &InnerRequest) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + r.path.len() + r.token.len() + r.body.len());
+    encode_request_head(
+        &RequestHead {
+            method: r.method,
+            json: r.json,
+            path: r.path.clone(),
+            token: r.token.clone(),
+        },
+        &mut out,
+    );
+    out.extend_from_slice(&r.body);
+    out
+}
+
+pub fn decode_request(data: &[u8]) -> Result<InnerRequest> {
+    let (h, at) = decode_request_head(data)?;
+    Ok(InnerRequest {
+        method: h.method,
+        json: h.json,
+        path: h.path,
+        token: h.token,
+        body: data[at..].to_vec(),
     })
 }
 
@@ -248,6 +300,14 @@ mod tests {
             confirm_tag(&tk, &cn, &sn, &sid),
             confirm_tag(&tk, &[5u8; 32], &sn, &sid)
         );
+        // In place is the same wire format.
+        let mut buf = b"hdr".to_vec();
+        buf.extend_from_slice(b"hello");
+        seal_message_in_place(&c2s, &sid, 7, &mut buf, 3);
+        assert_eq!(&buf[3..], ct);
+        assert!(open_message_in_place(&c2s, &sid, 8, &mut buf, 3).is_err());
+        open_message_in_place(&c2s, &sid, 7, &mut buf, 3).unwrap();
+        assert_eq!(buf, b"hdrhello");
     }
 
     #[test]
@@ -281,6 +341,13 @@ mod tests {
         assert_eq!(decode_request(&encode_request(&r)).unwrap(), r);
         assert!(decode_request(&[]).is_err());
         assert!(decode_request(&[9]).is_err());
+        assert!(
+            decode_request(&[2, 0, 5, b'a']).is_err(),
+            "field longer than the data"
+        );
+        let (head, at) = decode_request_head(&encode_request(&r)).unwrap();
+        assert_eq!(head.path, r.path);
+        assert_eq!(&encode_request(&r)[at..], &r.body[..]);
         let enc = encode_response(204, b"x");
         assert_eq!(decode_response(&enc).unwrap(), (204, &b"x"[..]));
     }

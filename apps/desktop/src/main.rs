@@ -861,9 +861,16 @@ async fn upload(
     let v = current_vault(&state).await?;
     let (dirs, files, skipped) = expand_local(&paths, &dir);
     let mut session = v.lock().await;
+    // Folders and files are committed in batches (one metadata write per batch, not per file);
+    // a file is reported done once the batch holding it is committed.
+    let mut staged = session.drive.stage();
     for remote in dirs {
-        session.drive.mkdir_p(&remote).await.map_err(cerr)?;
+        session
+            .drive
+            .mkdir_p_staged(&mut staged, &remote)
+            .map_err(cerr)?;
     }
+    let mut waiting = Vec::new();
     let mut summary = TransferSummary {
         done: 0,
         failed: 0,
@@ -908,30 +915,78 @@ async fn upload(
         };
         let res = session
             .drive
-            .upload(&path, &remote_dir, opts)
+            .upload_staged(&mut staged, &path, &remote_dir, opts)
             .await
             .map_err(cerr);
         state.transfers.finish(id);
         match res {
             Ok(stored) => {
-                summary.done += 1;
                 ev.name = stored;
-                ev.state = "done";
+                waiting.push(ev);
             }
             Err(e) if flag.load(Ordering::Relaxed) => {
                 summary.cancelled += 1;
                 ev.state = "cancelled";
                 ev.error = Some(e);
+                let _ = app.emit("transfer", ev);
             }
             Err(e) => {
                 summary.failed += 1;
                 ev.state = "error";
                 ev.error = Some(e);
+                let _ = app.emit("transfer", ev);
+            }
+        }
+        if session.drive.staged_due(&staged) {
+            commit_uploads(
+                &app,
+                &mut session.drive,
+                &mut staged,
+                &mut waiting,
+                &mut summary,
+            )
+            .await?;
+        }
+    }
+    commit_uploads(
+        &app,
+        &mut session.drive,
+        &mut staged,
+        &mut waiting,
+        &mut summary,
+    )
+    .await?;
+    Ok(summary)
+}
+
+/// Commit a batch of uploads and report its files done (or failed, with the commit's error).
+/// The error is returned only if no file was waiting to carry it (a batch of new folders).
+async fn commit_uploads(
+    app: &AppHandle,
+    drive: &mut strongbox_client::vault::VaultDrive,
+    staged: &mut strongbox_client::vault::Staged,
+    waiting: &mut Vec<TransferEvent>,
+    summary: &mut TransferSummary,
+) -> CmdResult<()> {
+    let res = drive.commit_staged(staged).await.map_err(cerr);
+    if waiting.is_empty() {
+        return res;
+    }
+    for mut ev in waiting.drain(..) {
+        match &res {
+            Ok(()) => {
+                summary.done += 1;
+                ev.state = "done";
+            }
+            Err(e) => {
+                summary.failed += 1;
+                ev.state = "error";
+                ev.error = Some(e.clone());
             }
         }
         let _ = app.emit("transfer", ev);
     }
-    Ok(summary)
+    Ok(())
 }
 
 #[derive(Deserialize)]

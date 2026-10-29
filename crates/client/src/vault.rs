@@ -5,19 +5,19 @@
 //! downloads: no profile, no credential id, no caches.
 
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use strongbox_core::names::validate_name;
 use strongbox_core::vault::{
     self as v, check_drive_pin, drive_salt, entry_key, header_entries, open_header,
     open_header_body, Entry, EntryKind, HeaderBody, MemberCreds, RecoveryCode, UsernameKeys, VDir,
-    VFile, VNode, VaultGrant, VaultMemberLabel, BLOCK_PAYLOAD, HEADER_BLOCKS, KEY_ENTRIES,
-    RECOVERY_ENTRY,
+    VFile, VNode, VaultGrant, VaultMemberLabel, BLOCK_PAYLOAD, ENTRIES_LEN, HEADER_BLOCKS,
+    HEADER_LEN, KEY_ENTRIES, RECOVERY_ENTRY,
 };
 use strongbox_core::Key;
 use strongbox_fido::{Authenticator, VAULT_USER_NAME};
@@ -198,7 +198,7 @@ pub async fn connect_account(
     let keys = username_keys(username, &server_id).await?;
     let (credentials, members) = credentials(&api, &keys).await?;
     let allow = credentials.clone();
-    let vsalt = keys.vault_salt();
+    let vsalt = keys.vault_salt()?;
     let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, None)).await?;
     login(
         api,
@@ -279,7 +279,7 @@ pub async fn create_vault_named(
     // A fresh random seed in the account record makes this account's login secrets unrelated
     // to those of any other server, even for the same credential.
     keys.new_seed();
-    let (cred, first) = enroll_with_vault_secret(authn, &[], &keys.vault_salt()).await?;
+    let (cred, first) = enroll_with_vault_secret(authn, &[], &keys.vault_salt()?).await?;
     let creds = MemberCreds::from_prf(&first);
     let credentials = vec![cred];
     let members = vec![VaultMemberLabel {
@@ -327,7 +327,7 @@ pub async fn connect(
     let (credentials, members) = credentials(&api, &keys).await?;
     let salt = drive_salt(slot, pin);
     let allow = credentials.clone();
-    let vsalt = keys.vault_salt();
+    let vsalt = keys.vault_salt()?;
     let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
     let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
     let member = MemberCreds::from_prf(&pair.first);
@@ -364,7 +364,17 @@ pub async fn connect_with_recovery(
         &code.member_creds(),
     )
     .await?;
-    for slot in 0..layout.slots {
+    // One request for every slot's entry table, then open only the slots whose recovery entry
+    // this code unlocks, instead of fetching the headers of every slot in turn.
+    let per_slot = HEADER_BLOCKS as usize * ENTRIES_LEN;
+    let all = client.api().read_all_entries(layout.slots).await?;
+    let candidates = (0..layout.slots).filter(|&slot| {
+        let keys = [(code.entry_key(slot), EntryKind::Recovery)];
+        all[slot as usize * per_slot..(slot as usize + 1) * per_slot]
+            .chunks(ENTRIES_LEN)
+            .any(|p| v::entries_open(slot, p, &keys))
+    });
+    for slot in candidates {
         let k = SlotKey {
             slot,
             key: code.entry_key(slot),
@@ -400,7 +410,7 @@ impl VaultClient {
         check_slot(&self.inner.layout, slot)?;
         let salt = drive_salt(slot, pin);
         let allow = self.inner.credentials.lock().unwrap().clone();
-        let vsalt = self.inner.username.vault_salt();
+        let vsalt = self.inner.username.vault_salt()?;
         let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let member = MemberCreds::from_prf(&pair.first);
@@ -415,24 +425,25 @@ impl VaultClient {
     /// Open the drive in a slot. `None` means "no drive for this slot and PIN", which is
     /// deliberately the same answer for a wrong PIN and a slot that was never used.
     pub async fn open(&self, k: &SlotKey) -> Result<Option<VaultDrive>> {
-        let bs = v::BLOCK_SIZE;
-        let headers = self.api().read_blocks(k.slot, 0, HEADER_BLOCKS, bs).await?;
+        let headers = self.api().read_headers(k.slot).await?;
         let keys = [(k.key.clone(), k.kind)];
-        let best = (0..2u8)
-            .filter_map(|c| {
-                let block = &headers[c as usize * bs..(c as usize + 1) * bs];
-                open_header(k.slot, c, block, &keys).map(|h| (c, h))
-            })
+        let best = headers
+            .chunks(HEADER_LEN)
+            .zip(0u8..)
+            .filter_map(|(header, c)| open_header(k.slot, c, header, &keys).map(|h| (c, h)))
             .max_by_key(|(_, h)| h.body.generation);
         let Some((copy, opened)) = best else {
             return Ok(None);
         };
-        let block = &headers[copy as usize * bs..(copy as usize + 1) * bs];
+        let header = headers
+            .chunks(HEADER_LEN)
+            .nth(copy as usize)
+            .expect("two copies");
         let mut drive = VaultDrive {
             client: self.clone(),
             slot: k.slot,
             drive_key: Arc::new(std::sync::RwLock::new(Some(opened.drive_key))),
-            entries: header_entries(block),
+            entries: header_entries(header),
             body: opened.body,
             copy,
             tree: VDir::default(),
@@ -476,7 +487,7 @@ impl VaultClient {
         // Copy 1 becomes filler: an old header there could still open with the same PIN
         // and must not outrank the new drive. Then the first commit writes copy 0.
         self.api()
-            .write_blocks(k.slot, 1, v::random_block())
+            .write_header(k.slot, 1, v::random_header())
             .await?;
         let tree = drive.tree.clone();
         drive.write_commit(tree).await?;
@@ -616,7 +627,7 @@ impl VaultClient {
                 v::MAX_RECORD_CREDENTIALS
             )));
         }
-        let vsalt = self.inner.username.vault_salt();
+        let vsalt = self.inner.username.vault_salt()?;
         let (credential, first) = enroll_with_vault_secret(authn, &credentials, &vsalt).await?;
         let member = MemberCreds::from_prf(&first);
         self.add_member(&member).await?;
@@ -795,6 +806,99 @@ fn runs(mut blocks: Vec<(u32, Vec<u8>)>) -> Vec<(u32, Vec<u8>)> {
     out.into_iter().map(|(s, d, _)| (s, d)).collect()
 }
 
+/// Requests kept in flight during a file transfer, so the network is not idle while the next
+/// batch is read and encrypted (or the last one decrypted and written out). The server sees
+/// the same requests as with one at a time, only overlapped.
+const IN_FLIGHT: usize = 3;
+
+/// Commit staged uploads once this many files are waiting...
+const STAGE_MAX_FILES: usize = 64;
+/// ...or this long after the first, so an interrupted batch loses little work.
+const STAGE_MAX_AGE: Duration = Duration::from_secs(10);
+
+/// Write (block, sealed data) pairs, one request per run of consecutive blocks.
+async fn write_runs(api: &Api, slot: u32, blocks: Vec<(u32, Vec<u8>)>) -> Result<()> {
+    for (start, data) in runs(blocks) {
+        api.write_blocks(slot, start, data).await?;
+    }
+    Ok(())
+}
+
+/// Read blocks (any order); returns them in the order asked.
+async fn read_runs(api: &Api, slot: u32, which: &[u32]) -> Result<Vec<Vec<u8>>> {
+    let bs = v::BLOCK_SIZE;
+    let mut out = Vec::with_capacity(which.len());
+    let mut i = 0;
+    while i < which.len() {
+        let mut n = 1;
+        while i + n < which.len()
+            && which[i + n] == which[i] + n as u32
+            && (n as u32) < MAX_BLOCKS_PER_REQUEST
+        {
+            n += 1;
+        }
+        let data = api.read_blocks(slot, which[i], n as u32, bs).await?;
+        out.extend(data.chunks(bs).map(<[u8]>::to_vec));
+        i += n;
+    }
+    Ok(out)
+}
+
+fn join_error(e: tokio::task::JoinError) -> Error {
+    if e.is_panic() {
+        std::panic::resume_unwind(e.into_panic());
+    }
+    Error::Cancelled
+}
+
+/// Transfer tasks that are aborted if the transfer ends early (error, cancel, wipe).
+struct InFlight<T>(VecDeque<tokio::task::JoinHandle<T>>);
+
+impl<T> Drop for InFlight<T> {
+    fn drop(&mut self) {
+        for h in &self.0 {
+            h.abort();
+        }
+    }
+}
+
+/// Create the folder `c` and any missing parents in `tree`. True if anything was created.
+fn mkdir_in(tree: &mut VDir, c: &[String]) -> Result<bool> {
+    let mut cur = tree;
+    let mut changed = false;
+    for (i, name) in c.iter().enumerate() {
+        let next = cur.entries.entry(name.clone()).or_insert_with(|| {
+            changed = true;
+            VNode::Dir(VDir {
+                entries: Default::default(),
+                mtime: now_ms(),
+            })
+        });
+        cur = match next {
+            VNode::Dir(d) => d,
+            VNode::File(_) => {
+                return Err(Error::Invalid(format!("/{} is a file", c[..=i].join("/"))))
+            }
+        };
+    }
+    Ok(changed)
+}
+
+/// Changes (uploads, new folders) waiting to be committed together: one metadata commit for
+/// a batch instead of one per file. Data blocks are written as each file is uploaded; until
+/// the commit they are indistinguishable from filler, exactly as during a single upload.
+pub struct Staged {
+    tree: VDir,
+    /// Drive generation the staged tree is based on; the commit refuses if it moved.
+    generation: u64,
+    changed: bool,
+    files: usize,
+    since: Option<Instant>,
+    /// A committed file was replaced: commit now, so its key is wiped as promptly as by an
+    /// unbatched upload.
+    replaced: bool,
+}
+
 impl VaultDrive {
     pub fn slot(&self) -> u32 {
         self.slot
@@ -840,7 +944,7 @@ impl VaultDrive {
         };
         let salt = drive_salt(self.slot, pin);
         let allow = vec![credential];
-        let vsalt = self.client.inner.username.vault_salt();
+        let vsalt = self.client.inner.username.vault_salt()?;
         let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let member = MemberCreds::from_prf(&pair.first);
@@ -894,7 +998,7 @@ impl VaultDrive {
         };
         let salt = drive_salt(self.slot, new_pin);
         let allow = vec![credential];
-        let vsalt = self.client.inner.username.vault_salt();
+        let vsalt = self.client.inner.username.vault_salt()?;
         let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         if member_id(&MemberCreds::from_prf(&pair.first).locator) != current {
@@ -1002,26 +1106,8 @@ impl VaultDrive {
 
     /// Create a folder and any missing parents; existing folders are fine.
     pub async fn mkdir_p(&mut self, path: &str) -> Result<()> {
-        let c = comps(path)?;
         let mut tree = self.tree.clone();
-        let mut cur = &mut tree;
-        let mut changed = false;
-        for (i, name) in c.iter().enumerate() {
-            let next = cur.entries.entry(name.clone()).or_insert_with(|| {
-                changed = true;
-                VNode::Dir(VDir {
-                    entries: Default::default(),
-                    mtime: now_ms(),
-                })
-            });
-            cur = match next {
-                VNode::Dir(d) => d,
-                VNode::File(_) => {
-                    return Err(Error::Invalid(format!("/{} is a file", c[..=i].join("/"))))
-                }
-            };
-        }
-        if changed {
+        if mkdir_in(&mut tree, &comps(path)?)? {
             self.commit(tree).await?;
         }
         Ok(())
@@ -1092,33 +1178,12 @@ impl VaultDrive {
     }
 
     async fn write_blocks(&self, blocks: Vec<(u32, Vec<u8>)>) -> Result<()> {
-        for (start, data) in runs(blocks) {
-            self.api().write_blocks(self.slot, start, data).await?;
-        }
-        Ok(())
+        write_runs(self.api(), self.slot, blocks).await
     }
 
     /// Read blocks (any order); returns them in the order asked.
     async fn read_blocks(&self, which: &[u32]) -> Result<Vec<Vec<u8>>> {
-        let bs = v::BLOCK_SIZE;
-        let mut out = Vec::with_capacity(which.len());
-        let mut i = 0;
-        while i < which.len() {
-            let mut n = 1;
-            while i + n < which.len()
-                && which[i + n] == which[i] + n as u32
-                && (n as u32) < MAX_BLOCKS_PER_REQUEST
-            {
-                n += 1;
-            }
-            let data = self
-                .api()
-                .read_blocks(self.slot, which[i], n as u32, bs)
-                .await?;
-            out.extend(data.chunks(bs).map(<[u8]>::to_vec));
-            i += n;
-        }
-        Ok(out)
+        read_runs(self.api(), self.slot, which).await
     }
 
     async fn read_meta(&self) -> Result<VDir> {
@@ -1164,21 +1229,12 @@ impl VaultDrive {
     /// previous metadata (it holds the keys of anything just deleted).
     async fn commit(&mut self, tree: VDir) -> Result<()> {
         // Refuse to overwrite a commit made elsewhere since we opened the drive.
-        let bs = v::BLOCK_SIZE;
-        let headers = self
-            .api()
-            .read_blocks(self.slot, 0, HEADER_BLOCKS, bs)
-            .await?;
+        let headers = self.api().read_headers(self.slot).await?;
         let dk = self.dk()?;
-        let latest = (0..2u8)
-            .filter_map(|c| {
-                open_header_body(
-                    self.slot,
-                    c,
-                    &headers[c as usize * bs..(c as usize + 1) * bs],
-                    &dk,
-                )
-            })
+        let latest = headers
+            .chunks(HEADER_LEN)
+            .zip(0u8..)
+            .filter_map(|(header, c)| open_header_body(self.slot, c, header, &dk))
             .map(|b| b.generation)
             .max()
             .unwrap_or(0);
@@ -1208,9 +1264,7 @@ impl VaultDrive {
         };
         let copy = 1 - self.copy;
         let header = v::seal_header(self.slot, copy, &self.dk()?, &self.entries, &body)?;
-        self.api()
-            .write_blocks(self.slot, copy as u32, header)
-            .await?;
+        self.api().write_header(self.slot, copy, header).await?;
 
         let old_meta = std::mem::replace(&mut self.body, body).meta_blocks;
         self.copy = copy;
@@ -1302,6 +1356,69 @@ impl VaultDrive {
         remote_dir: &str,
         opts: TransferOptions<'_>,
     ) -> Result<String> {
+        let mut staged = self.stage();
+        let stored = self
+            .upload_staged(&mut staged, local, remote_dir, opts)
+            .await?;
+        self.commit_staged(&mut staged).await?;
+        Ok(stored)
+    }
+
+    /// Start a batch of changes to commit together (see [`Staged`]). Make no other changes to
+    /// the drive until [`commit_staged`](Self::commit_staged); that commit refuses if any were.
+    pub fn stage(&self) -> Staged {
+        Staged {
+            tree: self.tree.clone(),
+            generation: self.body.generation,
+            changed: false,
+            files: 0,
+            since: None,
+            replaced: false,
+        }
+    }
+
+    /// Whether the batch should be committed now (many files, a while since the first, or a
+    /// replaced file whose old content should be wiped without delay).
+    pub fn staged_due(&self, staged: &Staged) -> bool {
+        staged.replaced
+            || staged.files >= STAGE_MAX_FILES
+            || staged.since.is_some_and(|t| t.elapsed() >= STAGE_MAX_AGE)
+    }
+
+    /// Commit the batch (nothing to do if it is empty) and start a new one, which is based on
+    /// the drive as it then is whether or not the commit succeeded (a failed batch's files are
+    /// left out; their blocks stay unreferenced filler).
+    pub async fn commit_staged(&mut self, staged: &mut Staged) -> Result<()> {
+        let result = if staged.generation != self.body.generation {
+            Err(Error::Invalid(
+                "the drive changed while uploads were waiting to be saved".into(),
+            ))
+        } else if staged.changed {
+            self.commit(staged.tree.clone()).await
+        } else {
+            Ok(())
+        };
+        *staged = self.stage();
+        result
+    }
+
+    /// [`mkdir_p`](Self::mkdir_p) into a batch.
+    pub fn mkdir_p_staged(&self, staged: &mut Staged, path: &str) -> Result<()> {
+        if mkdir_in(&mut staged.tree, &comps(path)?)? {
+            staged.changed = true;
+        }
+        Ok(())
+    }
+
+    /// Encrypt and upload a local file into `remote_dir` of a batch. Its data is written now;
+    /// it appears in the drive when the batch is committed. Returns the stored name.
+    pub async fn upload_staged(
+        &mut self,
+        staged: &mut Staged,
+        local: &Path,
+        remote_dir: &str,
+        opts: TransferOptions<'_>,
+    ) -> Result<String> {
         let name = local
             .file_name()
             .and_then(|n| n.to_str())
@@ -1323,7 +1440,7 @@ impl VaultDrive {
             .map_or_else(now_ms, |d| d.as_millis() as i64);
         let size = meta.len();
         let stored = {
-            let d = dir(&self.tree, &parent)?;
+            let d = dir(&staged.tree, &parent)?;
             match (d.entries.get(&name), opts.on_conflict) {
                 (None, _) => name.clone(),
                 (Some(_), OnConflict::KeepBoth) => unique_name(d, &name),
@@ -1336,43 +1453,72 @@ impl VaultDrive {
         };
 
         let n = v::file_block_count(size);
-        // A replaced file's blocks stay in use until the commit, so allocate around them.
-        let blocks = self.allocate(n, &self.used(&self.tree))?;
+        // Files replaced by this batch keep their blocks until the commit (they are still in
+        // the committed tree), and other staged files keep theirs: allocate around both.
+        let blocks = self.allocate(n, &self.used(&staged.tree))?;
+        // A fresh key for every upload: each block is sealed under it with its slot, block and
+        // index as associated data, so blocks cannot be swapped, reordered or rolled back
+        // (whatever was stored there before was sealed under another key), and the metadata
+        // fixes the size. That authenticates the whole file without a separate hash.
         let key = Key::random();
-        let mut hasher = Sha256::new();
         let mut reader = BufReader::new(File::open(local)?);
         let mut batch = Vec::new();
-        let mut done = 0u64;
+        let mut queued = 0u64;
+        let mut writes = InFlight(VecDeque::new());
         for (k, b) in blocks.iter().enumerate() {
             opts.check_cancel()?;
             self.dk()?;
-            let mut buf = vec![0u8; BLOCK_PAYLOAD.min((size - done) as usize)];
-            tokio::task::block_in_place(|| reader.read_exact(&mut buf))?;
-            hasher.update(&buf);
-            done += buf.len() as u64;
-            batch.push((*b, v::seal_file_block(&key, self.slot, *b, k as u32, &buf)));
+            let mut buf = vec![0u8; BLOCK_PAYLOAD.min((size - queued) as usize)];
+            let sealed = tokio::task::block_in_place(|| -> Result<Vec<u8>> {
+                reader.read_exact(&mut buf)?;
+                Ok(v::seal_file_block(&key, self.slot, *b, k as u32, &buf))
+            })?;
+            queued += buf.len() as u64;
+            batch.push((*b, sealed));
             if batch.len() == MAX_BLOCKS_PER_REQUEST as usize || k + 1 == n {
-                self.write_blocks(std::mem::take(&mut batch)).await?;
-                if let Some(p) = opts.progress {
-                    p(done, size);
+                if writes.0.len() >= IN_FLIGHT {
+                    let h = writes.0.pop_front().expect("non-empty");
+                    let done = h.await.map_err(join_error)??;
+                    if let Some(p) = opts.progress {
+                        p(done, size);
+                    }
                 }
+                let (api, slot, data) = (self.api().clone(), self.slot, std::mem::take(&mut batch));
+                let upto = queued;
+                writes.0.push_back(tokio::spawn(async move {
+                    write_runs(&api, slot, data).await.map(|()| upto)
+                }));
             }
         }
-        if done != size {
+        while let Some(h) = writes.0.pop_front() {
+            let done = h.await.map_err(join_error)??;
+            if let Some(p) = opts.progress {
+                p(done, size);
+            }
+        }
+        if queued != size {
             return Err(Error::Invalid("file changed while uploading".into()));
         }
         let file = VFile {
             size,
             mtime,
-            sha256: hasher.finalize().to_vec(),
             key,
             blocks,
         };
-        let mut tree = self.tree.clone();
-        dir_mut(&mut tree, &parent)?
+        if matches!(
+            dir(&self.tree, &parent)
+                .ok()
+                .and_then(|d| d.entries.get(&stored)),
+            Some(VNode::File(_))
+        ) {
+            staged.replaced = true;
+        }
+        dir_mut(&mut staged.tree, &parent)?
             .entries
             .insert(stored.clone(), VNode::File(file));
-        self.commit(tree).await?;
+        staged.changed = true;
+        staged.files += 1;
+        staged.since.get_or_insert_with(Instant::now);
         Ok(stored)
     }
 
@@ -1386,18 +1532,32 @@ impl VaultDrive {
     }
 
     async fn fetch<W: Write>(&self, f: &VFile, mut out: W, opts: TransferOptions<'_>) -> Result<W> {
-        let mut hasher = Sha256::new();
         let mut left = f.size;
         self.dk()?; // a wiped drive must not keep decrypting with the file keys it still holds
-        for (ci, chunk) in f.blocks.chunks(MAX_BLOCKS_PER_REQUEST as usize).enumerate() {
+        let chunks: Vec<Vec<u32>> = f
+            .blocks
+            .chunks(MAX_BLOCKS_PER_REQUEST as usize)
+            .map(<[u32]>::to_vec)
+            .collect();
+        // Reads run ahead of decryption; only ciphertext is fetched early.
+        let mut reads = InFlight(VecDeque::new());
+        let mut next = 0;
+        for (ci, chunk) in chunks.iter().enumerate() {
+            while next < chunks.len() && reads.0.len() < IN_FLIGHT {
+                let (api, slot, which) = (self.api().clone(), self.slot, chunks[next].clone());
+                reads.0.push_back(tokio::spawn(
+                    async move { read_runs(&api, slot, &which).await },
+                ));
+                next += 1;
+            }
             opts.check_cancel()?;
             self.dk()?;
-            let data = self.read_blocks(chunk).await?;
+            let h = reads.0.pop_front().expect("a read per chunk");
+            let data = h.await.map_err(join_error)??;
             for (j, (b, sealed)) in chunk.iter().zip(data).enumerate() {
                 let k = (ci * MAX_BLOCKS_PER_REQUEST as usize + j) as u32;
                 let plain = v::open_file_block(&f.key, self.slot, *b, k, &sealed)?;
                 let take = (left as usize).min(plain.len());
-                hasher.update(&plain[..take]);
                 tokio::task::block_in_place(|| out.write_all(&plain[..take]))?;
                 left -= take as u64;
             }
@@ -1405,7 +1565,7 @@ impl VaultDrive {
                 p(f.size - left, f.size);
             }
         }
-        if left != 0 || hasher.finalize().as_slice() != f.sha256.as_slice() {
+        if left != 0 {
             return Err(strongbox_core::Error::Integrity.into());
         }
         out.flush()?;
@@ -1488,7 +1648,7 @@ impl VaultDrive {
         let (a, ex) = (authn.clone(), existing.clone());
         let cred = blocking(move || a.enroll(DEFAULT_RP_ID, VAULT_USER_NAME, &ex)).await?;
         let allow = vec![cred.clone()];
-        let vsalt = inner.username.vault_salt();
+        let vsalt = inner.username.vault_salt()?;
         let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let ek = entry_key(&second);

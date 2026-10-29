@@ -177,7 +177,11 @@ pub async fn build_all(config: Config) -> anyhow::Result<(Router, Router)> {
         .await?;
     let decoy_secret = hex::decode(decoy_secret)?;
     let layout = vault_layout(&config, &db).await?;
-    let vaults = vaultstore::VaultStore::new(config.data_dir.join("vaults"), layout)?;
+    let vaults = vaultstore::VaultStore::new(
+        config.data_dir.join("vaults"),
+        config.data_dir.join("vault-spares"),
+        layout,
+    )?;
     // Accounts whose files are gone (data deleted by hand, an incomplete restore) can still sign
     // in but can't open a drive. Say so at startup; the count identifies no one.
     let missing = db
@@ -212,6 +216,27 @@ pub async fn build_all(config: Config) -> anyhow::Result<(Router, Router)> {
             janitor.channels.purge();
         }
     });
+
+    if state.config.spare_vaults > 0 {
+        let filler = state.clone();
+        tokio::spawn(async move {
+            loop {
+                let st = filler.clone();
+                let filled = tokio::task::spawn_blocking(move || {
+                    st.vaults.fill_spares(st.config.spare_vaults)
+                })
+                .await;
+                if let Ok(Err(e)) = filled {
+                    tracing::warn!("could not fill a spare vault: {e}");
+                }
+                // Refill when sign-up takes one; retry now and then after a failure (disk full).
+                tokio::select! {
+                    _ = filler.vaults.spare_taken.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(600)) => {}
+                }
+            }
+        });
+    }
 
     Ok((api::router(state.clone()), admin::router(state)))
 }

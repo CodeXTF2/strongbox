@@ -59,10 +59,13 @@ flowchart TD
     K -->|"touch 1: seeded vault salt → 256-bit PRF"| C["Sealed channel<br/>transport key from the PRF, AEAD + counters"]
     C -->|"challenge + Ed25519 login, all sealed"| V["Vault login"]
     V -->|"slot i + drive PIN"| K2["Security key touch 2: drive_salt(i, PIN)"]
-    K2 -->|"correct"| O["Drive opened<br/>commit wipes old metadata"]
-    K2 -->|"wrong PIN or unused slot"| N["Same 'No drive found' error"]
-    S["Vault: 100 slots, all random from creation"] -.-> K2
-    O -->|"stored as"| B["Fixed-size sealed blocks<br/>names, tree, sizes inside encrypted metadata"]
+    V -->|"or a recovery code"| R["One read of every slot's entry table<br/>opens only the slot the code unlocks"]
+    K2 -->|"read slot i's two 16 KiB header copies"| H["Fixed-size header<br/>entries + sealed body, rest of block filler"]
+    R --> H
+    H -->|"an entry opens"| O["Drive opened<br/>batched commits wipe old metadata"]
+    H -->|"wrong PIN or unused slot"| N["Same 'No drive found' error"]
+    S["Vault: 100 slots, all random from creation<br/>(spares pre-filled the same way)"] -.-> H
+    O -->|"stored as"| B["Fixed-size sealed blocks<br/>names, tree, sizes inside encrypted metadata;<br/>each file block bound to a fresh file key, slot, block and index"]
   end
 
   subgraph online["Online attacker"]
@@ -93,6 +96,7 @@ flowchart TD
   U -.->|mitigates| T4
   S -.->|mitigates| T5
   N -.->|mitigates| T5
+  H -.->|mitigates| T5
   K2 -.->|mitigates| T6
   O -.->|mitigates| T7
   K -.->|mitigates| T8
@@ -104,7 +108,7 @@ flowchart TD
   classDef vault fill:#fff3cd,stroke:#b58900,color:#000
   classDef threat fill:#f8d7da,stroke:#721c24,color:#000
   class L,K,C account
-  class N,S,S2 vault
+  class N,S,S2,H vault
   class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 threat
 ```
 
@@ -180,6 +184,8 @@ through an SSH tunnel (`ssh -L 4444:127.0.0.1:4444 host`).
 Every vault is allocated and filled with random bytes in full when it is created
 (`--vault-slots` × `--vault-slot-blocks` × 256 KiB; the defaults are 100 × 1024, i.e. 25 GiB
 per vault). Use a small layout for local testing; all vaults on a server share one layout.
+The server keeps `--spare-vaults` (default 1) vaults filled in advance so sign-up does not
+wait for the fill; each spare takes one vault's worth of disk (0 turns this off).
 
 ```sh
 cargo run -p strongbox-server -- --registration open --vault-slots 100 --vault-slot-blocks 16
@@ -209,12 +215,8 @@ end-to-end encrypted, authenticated channel keyed by a per-key `transport_key` d
 security key's PRF output (or a recovery code), so a hostile HTTP/SOCKS proxy, or a forged TLS
 certificate, sees only ciphertext and cannot read, alter, replay or answer requests (it can
 drop or delay them). Nothing is
-pinned or stored on the computer. Two things to know:
-
-- **Sign up on a network you trust.** Sign-up (and the username record lookup) are the only
-  calls in the clear, and sign-up carries the transport key.
-- **Accounts created before the sealed channel cannot sign in** and must be recreated
-  (`reset-server.bat` for a local test server).
+pinned or stored on the computer. **Sign up on a network you trust:** sign-up (and the
+username record lookup) are the only calls in the clear, and sign-up carries the transport key.
 
 Still visible to a network observer: IP addresses, timing and message sizes. Details and
 limits: [deniable-drives.md §8.1](docs/deniable-drives.md#81-sealed-channel).

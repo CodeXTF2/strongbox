@@ -19,7 +19,7 @@ use base64::Engine;
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use strongbox_core::vault::{locator_hash, verify_challenge, RECORD_LEN};
+use strongbox_core::vault::{locator_hash, verify_challenge, ENTRIES_LEN, HEADER_LEN, RECORD_LEN};
 use strongbox_proto::*;
 
 use crate::api::{check_registration, decoy_bytes, invalid_invite, rate_limit, ClientIp};
@@ -105,6 +105,9 @@ pub fn sealed_routes(state: &AppState) -> Router<Arc<AppState>> {
         .route("/v2/auth/session", post(create_session).delete(logout))
         .route("/v2/members", get(list_members).post(add_member))
         .route("/v2/members/{id}", delete(remove_member))
+        .route("/v2/entries", get(read_all_entries))
+        .route("/v2/slots/{slot}/headers", get(read_headers))
+        .route("/v2/slots/{slot}/headers/{copy}", put(write_header))
         .route(
             "/v2/slots/{slot}/blocks",
             get(read_blocks)
@@ -449,6 +452,59 @@ async fn read_blocks(
             .await
             .map_err(|_| AppError::from(std::io::Error::other("read task")))?
             .map_err(io_bad_request)?;
+    Ok(Bytes::from(data))
+}
+
+/// Both header copies of a slot (the first `HEADER_LEN` bytes of each header block).
+async fn read_headers(State(s): St, auth: VaultAuthed, Path(slot): Path<u32>) -> AppResult<Bytes> {
+    let st = s.clone();
+    let data = tokio::task::spawn_blocking(move || {
+        st.vaults
+            .read_header_prefixes(&auth.vault, slot, HEADER_LEN)
+    })
+    .await
+    .map_err(|_| AppError::from(std::io::Error::other("read task")))?
+    .map_err(io_bad_request)?;
+    Ok(Bytes::from(data))
+}
+
+/// Replace one header copy.
+async fn write_header(
+    State(s): St,
+    auth: VaultAuthed,
+    Path((slot, copy)): Path<(u32, u32)>,
+    body: Bytes,
+) -> AppResult<StatusCode> {
+    if body.len() != HEADER_LEN {
+        return Err(AppError::bad_request(
+            "a header is exactly HEADER_LEN bytes",
+        ));
+    }
+    let st = s.clone();
+    tokio::task::spawn_blocking(move || st.vaults.write_header(&auth.vault, slot, copy, &body))
+        .await
+        .map_err(|_| AppError::from(std::io::Error::other("write task")))?
+        .map_err(io_bad_request)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The entries (start of each header block) of every slot, in slot order: what a recovery
+/// code needs to find its drive, without fetching every slot's two header blocks.
+async fn read_all_entries(State(s): St, auth: VaultAuthed) -> AppResult<Bytes> {
+    let st = s.clone();
+    let data = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        for slot in 0..st.vaults.layout.slots {
+            out.extend(
+                st.vaults
+                    .read_header_prefixes(&auth.vault, slot, ENTRIES_LEN)?,
+            );
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|_| AppError::from(std::io::Error::other("read task")))?
+    .map_err(io_bad_request)?;
     Ok(Bytes::from(data))
 }
 

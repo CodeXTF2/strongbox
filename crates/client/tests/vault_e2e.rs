@@ -19,6 +19,10 @@ async fn start_server(data_dir: &Path) -> String {
 
 /// Service URL and admin page URL (separate listeners).
 async fn start_server_with_admin(data_dir: &Path) -> (String, String) {
+    start_server_sized(data_dir, SLOTS, BLOCKS).await
+}
+
+async fn start_server_sized(data_dir: &Path, slots: u32, blocks: u32) -> (String, String) {
     let config = Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         admin_listen: "127.0.0.1:1".parse().unwrap(),
@@ -29,9 +33,10 @@ async fn start_server_with_admin(data_dir: &Path) -> (String, String) {
         prelogin_rate_per_minute: 1000,
         trust_proxy: false,
         debug: false,
-        vault_slots: Some(SLOTS),
-        vault_slot_blocks: Some(BLOCKS),
+        vault_slots: Some(slots),
+        vault_slot_blocks: Some(blocks),
         drive_size: None,
+        spare_vaults: 0,
     };
     let (app, admin) = strongbox_server::build_all(config).await.unwrap();
     let mut urls = Vec::new();
@@ -548,7 +553,11 @@ async fn invite_codes_and_admin_page() {
 
     // The service port does not serve the admin page at all.
     assert_eq!(
-        http.get(format!("{url}/admin/stats")).send().await.unwrap().status(),
+        http.get(format!("{url}/admin/stats"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
         404
     );
 
@@ -618,7 +627,13 @@ async fn invite_codes_and_admin_page() {
         .unwrap();
     let again_code = again["code"].as_str().unwrap().to_string();
     assert!(matches!(
-        create_vault(&url, "first-user-abc", Some(again_code.clone()), key.clone()).await,
+        create_vault(
+            &url,
+            "first-user-abc",
+            Some(again_code.clone()),
+            key.clone()
+        )
+        .await,
         Err(Error::Api { status: 409, .. })
     ));
     create_vault(&url, "third-user-abc", Some(again_code), key.clone())
@@ -648,7 +663,13 @@ async fn invite_codes_and_admin_page() {
     .unwrap();
     assert_eq!(del.status(), 204);
     assert!(matches!(
-        create_vault(&url, "std-user-three", Some("friends-2026".into()), key.clone()).await,
+        create_vault(
+            &url,
+            "std-user-three",
+            Some("friends-2026".into()),
+            key.clone()
+        )
+        .await,
         Err(Error::Api { status: 403, .. })
     ));
 
@@ -665,4 +686,123 @@ async fn invite_codes_and_admin_page() {
         stats["allocated_bytes"],
         4 * SLOTS as u64 * BLOCKS as u64 * 262_144
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipelined_transfers_and_batched_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("local");
+    std::fs::create_dir_all(&local).unwrap();
+    // Drives big enough for a file spanning more requests than are kept in flight.
+    let (url, _) = start_server_sized(&tmp.path().join("server"), 2, 120).await;
+    let key: Arc<dyn Authenticator> = Arc::new(SoftAuthenticator::new(tmp.path().join("key.json")));
+    const USER: &str = "pipeline-test-user";
+    create_vault(&url, USER, Some("letmein".into()), key.clone())
+        .await
+        .unwrap();
+    let (vault, k) = connect(&url, USER, key.clone(), 1, "31415926")
+        .await
+        .unwrap();
+    let mut d = vault.create(&k).await.unwrap();
+
+    let payload = strongbox_core::vault::BLOCK_PAYLOAD;
+    let big: Vec<u8> = (0..(3 * 32 + 5) * payload as u32 + 1234)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
+    std::fs::write(local.join("big.bin"), &big).unwrap();
+    let seen = std::sync::Mutex::new(Vec::new());
+    let progress = |done: u64, total: u64| seen.lock().unwrap().push((done, total));
+    let opts = TransferOptions {
+        progress: Some(&progress),
+        ..Default::default()
+    };
+    d.upload(&local.join("big.bin"), "/", opts).await.unwrap();
+    {
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.windows(2).all(|w| w[0].0 <= w[1].0),
+            "progress only grows"
+        );
+        assert_eq!(seen.last(), Some(&(big.len() as u64, big.len() as u64)));
+    }
+    seen.lock().unwrap().clear();
+    d.download("/big.bin", &local.join("back.bin"), opts)
+        .await
+        .unwrap();
+    assert!(std::fs::read(local.join("back.bin")).unwrap() == big);
+    assert!(seen.lock().unwrap().windows(2).all(|w| w[0].0 <= w[1].0));
+
+    // A batch: folders and files appear together, in one commit, and persist.
+    let mut staged = d.stage();
+    d.mkdir_p_staged(&mut staged, "/a/b").unwrap();
+    for i in 0..3 {
+        let f = local.join(format!("f{i}.txt"));
+        std::fs::write(&f, format!("file {i}")).unwrap();
+        d.upload_staged(&mut staged, &f, "/a/b", TransferOptions::default())
+            .await
+            .unwrap();
+    }
+    assert!(d.list("/a").is_err(), "nothing visible before the commit");
+    assert!(!d.staged_due(&staged));
+    d.commit_staged(&mut staged).await.unwrap();
+    assert_eq!(d.list("/a/b").unwrap().len(), 3);
+    let again = vault.open(&k).await.unwrap().unwrap();
+    assert_eq!(
+        again.read_file("/a/b/f1.txt", 100).await.unwrap(),
+        b"file 1"
+    );
+    drop(again);
+
+    // Replacing a committed file makes the batch due at once (its old key is wiped promptly).
+    std::fs::write(local.join("f0.txt"), b"new content").unwrap();
+    d.upload_staged(
+        &mut staged,
+        &local.join("f0.txt"),
+        "/a/b",
+        TransferOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert!(d.staged_due(&staged));
+    d.commit_staged(&mut staged).await.unwrap();
+    assert_eq!(
+        d.read_file("/a/b/f0.txt", 100).await.unwrap(),
+        b"new content"
+    );
+
+    // A change made outside the batch is never undone by committing a stale batch.
+    let mut staged = d.stage();
+    d.upload_staged(
+        &mut staged,
+        &local.join("f2.txt"),
+        "/",
+        TransferOptions::default(),
+    )
+    .await
+    .unwrap();
+    d.mkdir("/outside").await.unwrap();
+    assert!(d.commit_staged(&mut staged).await.is_err());
+    assert!(d.list("/outside").is_ok());
+    assert!(d.list("/").unwrap().iter().all(|e| e.name != "f2.txt"));
+    // The batch restarted from the current drive, so it is usable again.
+    d.upload_staged(
+        &mut staged,
+        &local.join("f2.txt"),
+        "/",
+        TransferOptions::default(),
+    )
+    .await
+    .unwrap();
+    d.commit_staged(&mut staged).await.unwrap();
+    assert!(d.list("/outside").is_ok());
+    assert_eq!(d.read_file("/f2.txt", 100).await.unwrap(), b"file 2");
+    assert!(std::fs::read(local.join("back.bin")).unwrap() == big);
+    d.download(
+        "/big.bin",
+        &local.join("back2.bin"),
+        TransferOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert!(std::fs::read(local.join("back2.bin")).unwrap() == big);
 }

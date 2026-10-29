@@ -18,7 +18,7 @@ use axum::routing::post;
 use axum::{Extension, Router};
 use rand::RngCore;
 use strongbox_core::channel::{
-    self as ch, InnerRequest, Method, ReplayWindow, HELLO_NONCE_LEN, REQUEST_HEADER_LEN, SID_LEN,
+    self as ch, Method, ReplayWindow, RequestHead, HELLO_NONCE_LEN, REQUEST_HEADER_LEN, SID_LEN,
 };
 use strongbox_core::vault::BLOCK_SIZE;
 use strongbox_core::Key;
@@ -144,7 +144,6 @@ async fn rpc(
     }
     let sid: [u8; SID_LEN] = body[..SID_LEN].try_into().unwrap();
     let counter = u64::from_be_bytes(body[SID_LEN..REQUEST_HEADER_LEN].try_into().unwrap());
-    let ct = &body[REQUEST_HEADER_LEN..];
 
     // Look at the window first, authenticate, and only then commit the counter: a forger
     // who cannot produce a valid tag must not be able to burn counters.
@@ -157,24 +156,33 @@ async fn rpc(
             _ => return Err(AppError::unauthorized()),
         }
     };
-    let plain = ch::open_message(&c2s, &sid, counter, ct).map_err(|_| AppError::unauthorized())?;
+    // Decrypt in place: a block write is megabytes, and this keeps one copy of it.
+    let mut buf = Vec::from(body);
+    ch::open_message_in_place(&c2s, &sid, counter, &mut buf, REQUEST_HEADER_LEN)
+        .map_err(|_| AppError::unauthorized())?;
     {
         let mut map = state.channels.map.lock().unwrap();
         if !map.get_mut(&sid).is_some_and(|c| c.window.accept(counter)) {
             return Err(AppError::unauthorized());
         }
     }
-    let ireq =
-        ch::decode_request(&plain).map_err(|_| AppError::bad_request("malformed request"))?;
+    let (head, at) = ch::decode_request_head(&buf[REQUEST_HEADER_LEN..])
+        .map_err(|_| AppError::bad_request("malformed request"))?;
+    let inner_body = Bytes::from(buf).slice(REQUEST_HEADER_LEN + at..);
 
-    let (status, out) = dispatch(inner, ireq, connect, forwarded).await?;
-    let sealed = ch::seal_message(&s2c, &sid, counter, &ch::encode_response(status, &out));
+    let (status, out) = dispatch(inner, head, inner_body, connect, forwarded).await?;
+    let mut sealed = Vec::with_capacity(2 + out.len() + 16);
+    sealed.extend_from_slice(&status.to_be_bytes());
+    sealed.extend_from_slice(&out);
+    drop(out);
+    ch::seal_message_in_place(&s2c, &sid, counter, &mut sealed, 0);
     Ok(octets(sealed))
 }
 
 async fn dispatch(
     inner: Router,
-    ireq: InnerRequest,
+    ireq: RequestHead,
+    body: Bytes,
     connect: Option<ConnectInfo<SocketAddr>>,
     forwarded: Vec<axum::http::HeaderValue>,
 ) -> AppResult<(u16, Bytes)> {
@@ -200,7 +208,7 @@ async fn dispatch(
         b = b.header("x-forwarded-for", v);
     }
     let mut request = b
-        .body(Body::from(ireq.body))
+        .body(Body::from(body))
         .map_err(|_| AppError::bad_request("malformed request"))?;
     if let Some(c) = connect {
         request.extensions_mut().insert(c);

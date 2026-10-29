@@ -4523,7 +4523,6 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
- "sha2",
  "strongbox-core",
  "strongbox-fido",
  "strongbox-proto",

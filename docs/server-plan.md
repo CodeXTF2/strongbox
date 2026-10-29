@@ -35,6 +35,8 @@ fixed-size slot files per vault, single binary.
 | `DELETE /v2/auth/session` | bearer | logout |
 | `GET/POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys and recovery codes (the last member cannot be removed) |
 | `GET/PUT /v2/slots/{slot}/blocks` | bearer | read and write whole blocks |
+| `GET/PUT /v2/slots/{slot}/headers` | bearer | read both header copies, write one |
+| `GET /v2/entries` | bearer | every slot's header entry table (recovery-code login) |
 
 Details of each endpoint are in [deniable-drives.md](deniable-drives.md#8-server-v2).
 
@@ -63,8 +65,7 @@ registration invite-only.
   (the server must prove it holds the key). Only `/v1/info`, the record lookup, sign-up and the
   hello are in the clear. **Sign-up must happen on a network the user trusts**: it carries the
   transport key. Each account also has a random seed in its encrypted record that salts the
-  PRF input, so the same credential on two servers yields unrelated secrets. Accounts created
-  before this change have no transport key and must be recreated. Still visible to a proxy:
+  PRF input, so the same credential on two servers yields unrelated secrets. Still visible to a proxy:
   IPs, timing, message sizes, the lookup id and the member id at hello. No forward secrecy
   against later disclosure of the server's stored transport keys (file contents are
   end-to-end encrypted regardless).
@@ -75,8 +76,8 @@ registration invite-only.
   for development and prints a warning at startup.
 - **Registration and disk use.** Creating an account allocates and fills the whole vault
   (25 GiB with the default layout), so open registration on a public server is a disk-fill
-  risk. Use `invite` mode (the default) or add per-day caps; a pool of pre-filled vaults would
-  make creation instant and cheaper to rate-limit.
+  risk. Use `invite` mode (the default) or add per-day caps. `--spare-vaults` (default 1)
+  keeps vaults filled in advance so creation is instant; each spare costs one vault of disk.
 - **Account deletion** needs only a valid session. The desktop app signs in again first, but
   the server could require a fresh signature over the request.
 - **Session binding**: optional per-device keys, so stolen bearer tokens are useless.

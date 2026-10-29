@@ -11,7 +11,8 @@ use rand::RngCore;
 use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use strongbox_core::channel::{self as ch, InnerRequest, Method};
+use strongbox_core::channel::{self as ch, Method, RequestHead};
+use strongbox_core::vault::{ENTRIES_LEN, HEADER_BLOCKS, HEADER_LEN};
 use strongbox_core::Key;
 use strongbox_proto::*;
 use zeroize::Zeroizing;
@@ -173,7 +174,7 @@ impl Api {
             .as_ref()
             .ok_or_else(|| Error::Invalid("secure channel is not open".into()))?;
         let counter = chan.counter.fetch_add(1, Ordering::SeqCst) + 1;
-        let plain = ch::encode_request(&InnerRequest {
+        let head = RequestHead {
             method,
             json,
             path: path.to_string(),
@@ -182,12 +183,23 @@ impl Api {
                 .as_ref()
                 .map(|t| t.to_string())
                 .unwrap_or_default(),
-            body,
-        });
-        let mut msg = Vec::with_capacity(ch::REQUEST_HEADER_LEN + plain.len() + 16);
+        };
+        // Frame and seal in one buffer: block writes are megabytes.
+        let mut msg = Vec::with_capacity(
+            ch::REQUEST_HEADER_LEN + 5 + path.len() + head.token.len() + body.len() + 16,
+        );
         msg.extend_from_slice(&chan.sid);
         msg.extend_from_slice(&counter.to_be_bytes());
-        msg.extend_from_slice(&ch::seal_message(&chan.c2s, &chan.sid, counter, &plain));
+        ch::encode_request_head(&head, &mut msg);
+        msg.extend_from_slice(&body);
+        drop(body);
+        ch::seal_message_in_place(
+            &chan.c2s,
+            &chan.sid,
+            counter,
+            &mut msg,
+            ch::REQUEST_HEADER_LEN,
+        );
         let resp = Self::check(
             self.http
                 .post(self.url(CHANNEL_RPC_PATH))
@@ -196,11 +208,15 @@ impl Api {
                 .await?,
         )
         .await?;
-        let sealed = resp.bytes().await?;
-        let opened = ch::open_message(&chan.s2c, &chan.sid, counter, &sealed)
+        let mut out = Vec::from(resp.bytes().await?);
+        ch::open_message_in_place(&chan.s2c, &chan.sid, counter, &mut out, 0)
             .map_err(|_| Error::Invalid("the server's reply failed authentication".into()))?;
-        let (status, out) = ch::decode_response(&opened)?;
-        Ok((status, out.to_vec()))
+        if out.len() < 2 {
+            return Err(Error::Invalid("malformed channel response".into()));
+        }
+        let status = u16::from_be_bytes([out[0], out[1]]);
+        out.drain(..2);
+        Ok((status, out))
     }
 
     async fn sealed_body(
@@ -316,6 +332,37 @@ impl Api {
             return Err(Error::Invalid("server returned a short block read".into()));
         }
         Ok(out)
+    }
+
+    /// The entry tables of every slot (`ENTRIES_LEN` bytes per header copy, slots in order).
+    pub async fn read_all_entries(&self, slots: u32) -> Result<Vec<u8>> {
+        let out = self.sealed(Method::Get, "/v2/entries", None).await?;
+        if out.len() != slots as usize * HEADER_BLOCKS as usize * ENTRIES_LEN {
+            return Err(Error::Invalid("server returned a short entry read".into()));
+        }
+        Ok(out)
+    }
+
+    /// Both header copies of a slot, `HEADER_LEN` bytes each.
+    pub async fn read_headers(&self, slot: u32) -> Result<Vec<u8>> {
+        let out = self
+            .sealed(Method::Get, &format!("/v2/slots/{slot}/headers"), None)
+            .await?;
+        if out.len() != HEADER_BLOCKS as usize * HEADER_LEN {
+            return Err(Error::Invalid("server returned a short header read".into()));
+        }
+        Ok(out)
+    }
+
+    pub async fn write_header(&self, slot: u32, copy: u8, header: Vec<u8>) -> Result<()> {
+        self.sealed_body(
+            Method::Put,
+            &format!("/v2/slots/{slot}/headers/{copy}"),
+            false,
+            header,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn write_blocks(&self, slot: u32, start: u32, data: Vec<u8>) -> Result<()> {

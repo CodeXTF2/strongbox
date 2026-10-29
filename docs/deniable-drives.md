@@ -102,7 +102,7 @@ server: vault = 100 slots × fixed number of fixed-size blocks, all random from 
   seized database. A dictionary username ("alice") is found quickly; a random three-word
   name is not. The client says so when a username is chosen.
 - Each `getAssertion` evaluates two PRF inputs (`first`, `second`) for whichever of the
-  username's credentials is present. Opening a drive uses `first = VAULT_SALT` and
+  username's credentials is present. Opening a drive uses `first = vault_salt` (below) and
   `second = drive_salt(slot, pin)`: one touch logs in and opens the drive. Testing another
   drive PIN costs another touch.
 - **Backup keys** (up to 8 per username): enrolled with the existing credential ids as the
@@ -133,7 +133,6 @@ credentials are created with `credProtect` level 3 so that CTAP 2.0 keys cannot 
 ```
 seed                = 32 random bytes per account, stored in its encrypted record
 vault_salt          = H("strongbox/vault-salt/seeded/v1" ‖ 0 ‖ u32be(32) ‖ seed)
-                      (accounts from before seeds used the constant "strongbox/vault-salt/v1")
 drive_salt(i, pin)  = H("strongbox/drive-salt/v1" ‖ 0 ‖ u32be(i) ‖ pin)
 
 prf_v = PRF(vault_salt),  prf_d = PRF(drive_salt(i, pin))     -- same touch
@@ -182,23 +181,27 @@ and filler are both uniformly random to anyone without the key.
 
 ### Slot header (blocks 0 and 1)
 
-Two copies so updates are atomic: a commit writes the copy with the older generation.
+Two copies so updates are atomic: a commit writes the copy with the older generation. Each
+copy is a fixed `HEADER_LEN` = 16 KiB at the start of its block; the rest of the block keeps
+the random filler written when the vault was created, so a header block looks like any other.
 
 ```
 entry[0..8]  key entries      8 × (nonce 24 ‖ AEAD(entry key, drive key 32) ‖ tag 16) = 72 B each
 entry[8]     recovery entry   same format, recovery entry key
-body         nonce ‖ AEAD(KDF(drive key, "strongbox/drive/header/v1"), cbor body, padded) ‖ tag
+body         nonce ‖ AEAD(KDF(drive key, "strongbox/drive/header/v2"), cbor body, padded) ‖ tag
 ```
 
 AAD: entries bind `("strongbox/drive/entry/v1", u32be(slot), u8(index))`; the body binds
-`("strongbox/drive/header/v1", u32be(slot), u8(copy))`. Unused entries are random.
+`("strongbox/drive/header/v2", u32be(slot), u8(copy))`. Unused entries are random. The body
+is padded to a fixed size (16 KiB less the entries, nonce and tag), so its length reveals
+nothing; that leaves room for about 3,000 metadata blocks (750 MiB of metadata).
 
 Body (CBOR): `{ generation: u64, used_entries: u16 bitmask, grants: [(entry, member_id)], meta: { blocks: [u32], len: u64 } }`.
 `used_entries` lets the client add a key or recovery code without overwriting another
 key's entry; `grants` records which account members can open this drive. Both are only
 readable with the drive key.
 
-Opening slot *i*: read blocks 0–1, try every entry with the entry key, take the copy with
+Opening slot *i*: read both header copies, try every entry with the entry key, take the copy with
 the highest generation whose body authenticates. If no entry opens: **"No drive found for
 this slot and PIN"**, the same message, code path and timing for a wrong PIN and an unused
 slot.
@@ -210,12 +213,18 @@ The whole tree is one CBOR document, sealed into metadata blocks under
 
 ```
 Dir  { entries: name → Node, mtime }
-Node = Dir | File { size, mtime, sha256, key, blocks: [u32] }
+Node = Dir | File { size, mtime, key, blocks: [u32] }
 ```
 
 File content: block *k* of a file holds plaintext bytes `[k·cap, (k+1)·cap)` (cap = BLOCK − 40),
 zero-padded, sealed under the file's own random key with AAD
 `("strongbox/drive/file/v1", slot, block index, u32be(k))`. Size is rounded to whole blocks.
+
+There is no whole-file hash: the per-block AEAD already authenticates the file. Every upload
+gets a fresh key, so a block moved from elsewhere, a block at the wrong index, or an older
+ciphertext at the same place (sealed under some earlier file's key) fails to open, and the
+size and block list come from the authenticated metadata. Anything that writes file blocks
+must keep that rule: never reuse a file key for new content.
 
 **Allocation** is implicit: a block is free unless the header, the current metadata, or a
 file references it. No allocation map is stored.
@@ -227,6 +236,12 @@ the keys of deleted files, and the drive key is long-lived, so a coerced drive P
 otherwise recover "deleted" files. Freed file blocks need no wiping once no metadata
 references their keys.
 
+Several uploads may share one commit (the desktop app and CLI batch up to 64 files or 10
+seconds): their file blocks are written as each upload runs and are unreferenced filler until
+the commit, as during a single upload. A batch that replaces an existing file is committed
+at once, so the old file's key is wiped as promptly as without batching. A batch is refused if
+the drive was committed by anything else since the batch began.
+
 **Creating or resetting a drive** writes both header copies with fresh random entries, a new
 random drive key and empty metadata. The rest of the slot is left as is (it is
 indistinguishable from filler once no key references it). Resetting an in-use slot destroys
@@ -234,12 +249,13 @@ that drive; the UI says so every time, since it cannot know.
 
 ### What is transferred
 
-Opening a drive downloads only its two header blocks and its metadata blocks (typically
-768 KiB in total, whatever the drive's size); the tree is then decrypted and browsed in memory.
-File blocks are fetched only when a file is downloaded or previewed. A commit re-reads the
-two header blocks, then writes file blocks (for uploads), new metadata, one header copy and
-the wipe of the old metadata. Logging in with a recovery code reads both header blocks of
-every slot (about 50 MiB with 100 slots), since the code does not say which slot it opens.
+Opening a drive downloads its two header copies (32 KiB) and its metadata blocks (typically
+one, 256 KiB), whatever the drive's size; the tree is then decrypted and browsed in memory.
+File blocks are fetched only when a file is downloaded or previewed, with a few requests in
+flight at once. A commit re-reads the two header copies, then writes file blocks (for
+uploads), new metadata, one header copy and the wipe of the old metadata. Logging in with a
+recovery code reads the entry table of every slot in one request (about 130 KB with 100
+slots), since the code does not say which slot it opens, then opens the slot it unlocks.
 
 On-demand access is why a live or recording server can see which slot is in use (§1):
 hiding that would need dummy reads and writes across all slots on every session.
@@ -272,6 +288,9 @@ The client requires at least 8 digits and recommends 10, or a passphrase.
 | `GET /v2/members`, `POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys / recovery codes (last member cannot be removed) |
 | `GET /v2/slots/{slot}/blocks?start&count` | bearer | read whole blocks |
 | `PUT /v2/slots/{slot}/blocks?start` | bearer | write whole blocks (body = n × BLOCK) |
+| `GET /v2/slots/{slot}/headers` | bearer | both header copies (`HEADER_LEN` bytes each) |
+| `PUT /v2/slots/{slot}/headers/{copy}` | bearer | replace one header copy (body = `HEADER_LEN` bytes) |
+| `GET /v2/entries` | bearer | the entry table (first `ENTRIES_LEN` bytes of each header copy) of every slot, in slot order: a recovery code finds its drive with one small read instead of two header blocks per slot |
 | `POST /v2/channel`, `POST /v2/rpc` | – | the sealed channel (§8.1) |
 
 Only `GET /v1/info`, `GET /v2/lookup/{id}`, `POST /v2/vaults`, `POST /v2/channel` and
@@ -321,14 +340,14 @@ sees only ciphertext.
   is no forward secrecy for the transport: a later disclosure of the server's stored transport
   keys would let recorded traffic be decrypted (file contents stay end-to-end encrypted). It
   does not detect a server serving stale or rolled-back blocks (§9).
-- **Accounts created before the channel** have no transport key and cannot sign in; they must
-  be recreated.
 
 Deniability requirements on the server:
 
 - **Filler** is written at vault creation from a CSPRNG seeded from the OS and discarded.
-  Lazy filling is not allowed: it would reveal which blocks were ever touched. (Production
-  deployments should keep a few pre-filled vaults ready so creation is instant.)
+  Lazy filling is not allowed: it would reveal which blocks were ever touched. The server
+  keeps `--spare-vaults` (default 1) vaults filled ahead of time in `vault-spares/` and renames
+  one into place at sign-up, so creation is instant; a spare is filled exactly like a vault
+  filled at sign-up and holds nothing about anyone until it is taken.
 - **No ordering or time metadata:** random vault ids, `WITHOUT ROWID` tables, no per-vault
   counters, no usage accounting (a vault is always "full"). Slot files get a constant
   modification time after every write. Sessions and challenges live in memory only.

@@ -25,16 +25,17 @@ pub const KEY_ENTRIES: usize = 8;
 pub const RECOVERY_ENTRY: usize = KEY_ENTRIES;
 const ENTRIES: usize = KEY_ENTRIES + 1;
 pub const ENTRY_LEN: usize = aead::NONCE_LEN + 32 + aead::TAG_LEN;
-const ENTRIES_LEN: usize = ENTRIES * ENTRY_LEN;
-const HEADER_BODY_PLAIN: usize = BLOCK_SIZE - ENTRIES_LEN - aead::NONCE_LEN - aead::TAG_LEN;
-/// Blocks 0 and 1 of every slot are the two header copies.
+/// Bytes at the start of a header holding its entries (the sealed body follows).
+pub const ENTRIES_LEN: usize = ENTRIES * ENTRY_LEN;
+/// A header: entries and sealed body, at the start of its header block. It is fixed-size, so
+/// its length says nothing about the drive; the rest of the block keeps its random filler.
+/// Reading and writing only this prefix keeps opening and committing a drive cheap.
+pub const HEADER_LEN: usize = 16 * 1024;
+const HEADER_BODY_PLAIN: usize = HEADER_LEN - ENTRIES_LEN - aead::NONCE_LEN - aead::TAG_LEN;
+/// Blocks 0 and 1 of every slot hold the two header copies.
 pub const HEADER_BLOCKS: u32 = 2;
 /// Shortest drive PIN the client accepts (see the spec's guessing-cost table).
 pub const MIN_DRIVE_PIN_LEN: usize = 8;
-
-/// PRF input that yields the vault secret (login) for accounts created before per-account
-/// seeds. New accounts use [`vault_salt`] with their own random seed instead.
-pub const VAULT_SALT: &[u8] = b"strongbox/vault-salt/v1";
 
 const L_DRIVE_SALT: &str = "strongbox/drive-salt/v1";
 const L_LOCATOR: &str = "strongbox/vault/locator/v1";
@@ -46,7 +47,7 @@ const L_REC_LOCATOR: &str = "strongbox/vault/recovery-locator/v1";
 const L_REC_AUTH: &str = "strongbox/vault/recovery-auth/v1";
 const L_ENTRY: &str = "strongbox/drive/entry/v1";
 const L_REC_ENTRY: &str = "strongbox/drive/recovery-entry/v1";
-const L_HEADER: &str = "strongbox/drive/header/v1";
+const L_HEADER: &str = "strongbox/drive/header/v2";
 const L_META: &str = "strongbox/drive/meta/v1";
 const L_FILE: &str = "strongbox/drive/file/v1";
 const L_CHALLENGE: &str = "strongbox/vault-auth-challenge/v1";
@@ -64,13 +65,9 @@ pub fn drive_salt(slot: u32, pin: &str) -> [u8; 32] {
 
 /// PRF input for the vault login of an account with a random per-account `seed` (stored in its
 /// encrypted record). It makes the same credential on two servers yield unrelated secrets, so a
-/// hostile server cannot obtain another server's login or transport keys. `None` is an account
-/// from before seeds.
-pub fn vault_salt(seed: Option<&[u8; 32]>) -> Vec<u8> {
-    match seed {
-        None => VAULT_SALT.to_vec(),
-        Some(seed) => Sha256::digest(kdf::info(L_VAULT_SEED, &[seed])).to_vec(),
-    }
+/// hostile server cannot obtain another server's login or transport keys.
+pub fn vault_salt(seed: &[u8; 32]) -> Vec<u8> {
+    Sha256::digest(kdf::info(L_VAULT_SEED, &[seed])).to_vec()
 }
 
 /// Check a drive PIN against the minimum length (digits or a passphrase).
@@ -168,11 +165,9 @@ pub struct UsernameKeys {
     /// The server's index for this username's record (sent in the clear).
     pub lookup: [u8; 32],
     record_key: Key,
-    /// The account's random PRF-salt seed. Outer `None`: not loaded yet. Otherwise set by
-    /// [`new_seed`](Self::new_seed) at sign-up or read back by [`open_record`](Self::open_record)
-    /// (inner `None`: an account from before seeds). Sealing a record before it is loaded would
-    /// drop the seed and lock the owner out, so [`seal_record`](Self::seal_record) refuses.
-    seed: std::sync::Mutex<Option<Option<[u8; 32]>>>,
+    /// The account's random PRF-salt seed, set by [`new_seed`](Self::new_seed) at sign-up or
+    /// read back by [`open_record`](Self::open_record); `None` until then.
+    seed: std::sync::Mutex<Option<[u8; 32]>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -187,8 +182,7 @@ pub struct VaultMemberLabel {
 struct CredentialRecord {
     credential_ids: Vec<serde_bytes::ByteBuf>,
     members: Vec<VaultMemberLabel>,
-    #[serde(default)]
-    seed: Option<serde_bytes::ByteBuf>,
+    seed: serde_bytes::ByteBuf,
 }
 
 impl UsernameKeys {
@@ -211,12 +205,20 @@ impl UsernameKeys {
     pub fn new_seed(&self) {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
-        *self.seed.lock().unwrap() = Some(Some(seed));
+        *self.seed.lock().unwrap() = Some(seed);
     }
 
-    /// The PRF input for this account's vault login.
-    pub fn vault_salt(&self) -> Vec<u8> {
-        vault_salt(self.seed.lock().unwrap().and_then(|s| s).as_ref())
+    fn seed(&self) -> Result<[u8; 32]> {
+        self.seed
+            .lock()
+            .unwrap()
+            .ok_or(Error::Malformed("account seed not loaded"))
+    }
+
+    /// The PRF input for this account's vault login. Fails until the seed is known (sign-up or
+    /// an opened record).
+    pub fn vault_salt(&self) -> Result<Vec<u8>> {
+        Ok(vault_salt(&self.seed()?))
     }
 
     /// Encrypt the credential ids of this username's security keys.
@@ -225,11 +227,7 @@ impl UsernameKeys {
         credential_ids: &[Vec<u8>],
         members: &[VaultMemberLabel],
     ) -> Result<Vec<u8>> {
-        let seed = self
-            .seed
-            .lock()
-            .unwrap()
-            .ok_or(Error::Malformed("account seed not loaded"))?;
+        let seed = self.seed()?;
         if credential_ids.is_empty() || credential_ids.len() > MAX_RECORD_CREDENTIALS {
             return Err(Error::Malformed(
                 "credential record must hold 1-8 credentials",
@@ -242,7 +240,7 @@ impl UsernameKeys {
                 .map(|c| serde_bytes::ByteBuf::from(c.clone()))
                 .collect(),
             members: members.to_vec(),
-            seed: seed.map(|s| serde_bytes::ByteBuf::from(s.to_vec())),
+            seed: serde_bytes::ByteBuf::from(seed.to_vec()),
         };
         ciborium::into_writer(&record, &mut cbor).map_err(|e| Error::Encoding(e.to_string()))?;
         if cbor.len() + 4 > RECORD_PLAIN {
@@ -269,10 +267,7 @@ impl UsernameKeys {
         .ok()?;
         let len = u32::from_be_bytes(plain.get(..4)?.try_into().ok()?) as usize;
         let record: CredentialRecord = ciborium::from_reader(plain.get(4..4 + len)?).ok()?;
-        let seed = match &record.seed {
-            None => None,
-            Some(s) => Some(<[u8; 32]>::try_from(s.as_slice()).ok()?),
-        };
+        let seed = <[u8; 32]>::try_from(record.seed.as_slice()).ok()?;
         *self.seed.lock().unwrap() = Some(seed);
         Some((
             record
@@ -339,6 +334,13 @@ pub fn entry_key(prf_drive: &[u8; 32]) -> Key {
 // ---------------------------------------------------------------- blocks
 
 /// A block of fresh random bytes (filler, wiping).
+/// Random bytes the size of a header (for a header copy that must not open).
+pub fn random_header() -> Vec<u8> {
+    let mut b = vec![0u8; HEADER_LEN];
+    rand::thread_rng().fill_bytes(&mut b);
+    b
+}
+
 pub fn random_block() -> Vec<u8> {
     let mut b = vec![0u8; BLOCK_SIZE];
     rand::thread_rng().fill_bytes(&mut b);
@@ -372,7 +374,6 @@ pub struct HeaderBody {
     pub meta_blocks: Vec<u32>,
     pub meta_len: u64,
     /// Which account credentials can open this drive; encrypted with the drive header.
-    #[serde(default)]
     pub grants: Vec<VaultGrant>,
 }
 
@@ -410,10 +411,10 @@ fn header_aad(slot: u32, copy: u8) -> Vec<u8> {
     aead::aad(L_HEADER, &[&slot.to_be_bytes(), &[copy]])
 }
 
-/// The entries of a header block (valid or random), to carry over when rewriting it.
-pub fn header_entries(block: &[u8]) -> [Entry; ENTRIES] {
+/// The entries of a header (valid or random), to carry over when rewriting it.
+pub fn header_entries(header: &[u8]) -> [Entry; ENTRIES] {
     std::array::from_fn(|i| {
-        block[i * ENTRY_LEN..(i + 1) * ENTRY_LEN]
+        header[i * ENTRY_LEN..(i + 1) * ENTRY_LEN]
             .try_into()
             .unwrap()
     })
@@ -435,7 +436,7 @@ pub fn seal_header(
     plain.extend_from_slice(&(cbor.len() as u32).to_be_bytes());
     plain.extend_from_slice(&cbor);
     plain.resize(HEADER_BODY_PLAIN, 0);
-    let mut out = Vec::with_capacity(BLOCK_SIZE);
+    let mut out = Vec::with_capacity(HEADER_LEN);
     for e in entries {
         out.extend_from_slice(e);
     }
@@ -444,7 +445,7 @@ pub fn seal_header(
         &header_aad(slot, copy),
         &plain,
     ));
-    debug_assert_eq!(out.len(), BLOCK_SIZE);
+    debug_assert_eq!(out.len(), HEADER_LEN);
     Ok(out)
 }
 
@@ -461,27 +462,16 @@ pub struct OpenedHeader {
 pub fn open_header(
     slot: u32,
     copy: u8,
-    block: &[u8],
+    header: &[u8],
     keys: &[(Key, EntryKind)],
 ) -> Option<OpenedHeader> {
-    if block.len() != BLOCK_SIZE {
+    if header.len() != HEADER_LEN {
         return None;
     }
-    let entries = header_entries(block);
+    let entries = header_entries(header);
     for (key, kind) in keys {
-        let range = match kind {
-            EntryKind::Key => 0..KEY_ENTRIES,
-            EntryKind::Recovery => RECOVERY_ENTRY..RECOVERY_ENTRY + 1,
-        };
-        for i in range {
-            let Ok(dk) = aead::open(key, &entry_aad(slot, i), &entries[i]) else {
-                continue;
-            };
-            let Ok(dk) = <[u8; 32]>::try_from(dk.as_slice()) else {
-                continue;
-            };
-            let drive_key = Key::from_bytes(dk);
-            let Some(body) = open_header_body(slot, copy, block, &drive_key) else {
+        for (i, drive_key) in open_entries(slot, &entries, key, *kind) {
+            let Some(body) = open_header_body(slot, copy, header, &drive_key) else {
                 continue;
             };
             return Some(OpenedHeader {
@@ -494,16 +484,48 @@ pub fn open_header(
     None
 }
 
+/// The drive keys that `key` unwraps from a header's entries, with their entry index.
+fn open_entries<'a>(
+    slot: u32,
+    entries: &'a [Entry; ENTRIES],
+    key: &'a Key,
+    kind: EntryKind,
+) -> impl Iterator<Item = (usize, Key)> + 'a {
+    let range = match kind {
+        EntryKind::Key => 0..KEY_ENTRIES,
+        EntryKind::Recovery => RECOVERY_ENTRY..RECOVERY_ENTRY + 1,
+    };
+    range.filter_map(move |i| {
+        let dk = aead::open(key, &entry_aad(slot, i), &entries[i]).ok()?;
+        Some((
+            i,
+            Key::from_bytes(<[u8; 32]>::try_from(dk.as_slice()).ok()?),
+        ))
+    })
+}
+
+/// Whether any of `keys` opens an entry in `prefix`, the first [`ENTRIES_LEN`] bytes of a
+/// header copy. A cheap pre-check: [`open_header`] can only succeed on a copy that passes it,
+/// so a wrong PIN or an unused slot can be answered without fetching whole header blocks.
+pub fn entries_open(slot: u32, prefix: &[u8], keys: &[(Key, EntryKind)]) -> bool {
+    if prefix.len() != ENTRIES_LEN {
+        return false;
+    }
+    let entries = header_entries(prefix);
+    keys.iter()
+        .any(|(key, kind)| open_entries(slot, &entries, key, *kind).next().is_some())
+}
+
 /// Decrypt a header copy's body with a known drive key (`None` if it does not authenticate,
 /// e.g. the copy was never written or belongs to an older drive in this slot).
-pub fn open_header_body(slot: u32, copy: u8, block: &[u8], drive_key: &Key) -> Option<HeaderBody> {
-    if block.len() != BLOCK_SIZE {
+pub fn open_header_body(slot: u32, copy: u8, header: &[u8], drive_key: &Key) -> Option<HeaderBody> {
+    if header.len() != HEADER_LEN {
         return None;
     }
     let plain = aead::open(
         &header_key(drive_key),
         &header_aad(slot, copy),
-        &block[ENTRIES_LEN..],
+        &header[ENTRIES_LEN..],
     )
     .ok()?;
     let len = u32::from_be_bytes(plain[..4].try_into().unwrap()) as usize;
@@ -534,8 +556,6 @@ pub enum VNode {
 pub struct VFile {
     pub size: u64,
     pub mtime: i64,
-    #[serde(with = "serde_bytes")]
-    pub sha256: Vec<u8>,
     pub key: Key,
     pub blocks: Vec<u32>,
 }
@@ -681,22 +701,21 @@ mod tests {
     #[test]
     fn seeds_and_transport_keys() {
         let k = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
-        assert_eq!(k.vault_salt(), VAULT_SALT, "no seed: the pre-seed salt");
+        assert!(k.vault_salt().is_err(), "no salt before the seed is known");
         assert!(
             k.seal_record(&[vec![1; 64]], &[]).is_err(),
             "must not seal a record before the seed is known"
         );
         k.new_seed();
-        let salt = k.vault_salt();
-        assert_ne!(salt, VAULT_SALT);
+        let salt = k.vault_salt().unwrap();
         // The seed survives the encrypted record, and differs between accounts.
         let record = k.seal_record(&[vec![1; 64]], &[]).unwrap();
         let again = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
         assert!(again.open_record(&record).is_some());
-        assert_eq!(again.vault_salt(), salt);
+        assert_eq!(again.vault_salt().unwrap(), salt);
         let other = UsernameKeys::derive("quiet-river-lantern", "srv").unwrap();
         other.new_seed();
-        assert_ne!(other.vault_salt(), salt);
+        assert_ne!(other.vault_salt().unwrap(), salt);
         // The transport key is separate from the login material derived from the same PRF.
         let m = MemberCreds::from_prf(&prf(1));
         assert_ne!(m.transport.as_bytes(), &m.locator);
@@ -750,16 +769,51 @@ mod tests {
             grants: vec![],
         };
         let block = seal_header(slot, 0, &drive_key, &entries, &body).unwrap();
-        assert_eq!(block.len(), BLOCK_SIZE);
+        assert_eq!(block.len(), HEADER_LEN);
 
         let opened = open_header(slot, 0, &block, &[(good.clone(), EntryKind::Key)]).unwrap();
         assert_eq!((opened.entry, &opened.body), (2, &body));
         assert_eq!(opened.drive_key, drive_key);
+        // The entry pre-check agrees with open_header for keys, slots and entry kinds.
+        let prefix = &block[..ENTRIES_LEN];
+        assert!(entries_open(
+            slot,
+            prefix,
+            &[(good.clone(), EntryKind::Key)]
+        ));
+        assert!(!entries_open(
+            slot,
+            prefix,
+            &[(wrong.clone(), EntryKind::Key)]
+        ));
+        assert!(!entries_open(
+            slot + 1,
+            prefix,
+            &[(good.clone(), EntryKind::Key)]
+        ));
+        assert!(!entries_open(
+            slot,
+            prefix,
+            &[(good.clone(), EntryKind::Recovery)]
+        ));
+        assert!(!entries_open(
+            slot,
+            &random_block()[..ENTRIES_LEN],
+            &[(good.clone(), EntryKind::Key)]
+        ));
+        assert!(!entries_open(
+            slot,
+            &prefix[1..],
+            &[(good.clone(), EntryKind::Key)]
+        ));
         // Wrong PIN, wrong slot, wrong copy and pure filler all fail the same way.
         assert!(open_header(slot, 0, &block, &[(wrong, EntryKind::Key)]).is_none());
         assert!(open_header(slot + 1, 0, &block, &[(good.clone(), EntryKind::Key)]).is_none());
         assert!(open_header(slot, 1, &block, &[(good.clone(), EntryKind::Key)]).is_none());
-        assert!(open_header(slot, 0, &random_block(), &[(good.clone(), EntryKind::Key)]).is_none());
+        assert!(
+            open_header(slot, 0, &random_header(), &[(good.clone(), EntryKind::Key)]).is_none()
+        );
+        assert!(open_header(slot, 0, &block[1..], &[(good.clone(), EntryKind::Key)]).is_none());
         // A key entry is not accepted as the recovery entry.
         assert!(open_header(slot, 0, &block, &[(good, EntryKind::Recovery)]).is_none());
         // Entries carry over byte for byte.
@@ -791,6 +845,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(o.entry, RECOVERY_ENTRY);
+        let recovery = [(back.entry_key(slot), EntryKind::Recovery)];
+        assert!(entries_open(slot, &block[..ENTRIES_LEN], &recovery));
         assert!(open_header(
             slot,
             1,
@@ -815,7 +871,6 @@ mod tests {
                 VNode::File(VFile {
                     size: 1,
                     mtime: 2,
-                    sha256: vec![0; 32],
                     key: Key::random(),
                     blocks: vec![i],
                 }),
@@ -844,6 +899,11 @@ mod tests {
         assert_eq!(open_file_block(&fk, slot, 42, 0, &b).unwrap(), want);
         assert!(open_file_block(&fk, slot, 43, 0, &b).is_err());
         assert!(open_file_block(&fk, slot, 42, 1, &b).is_err());
+        // What a file relies on instead of a whole-file hash: a block from another slot, or an
+        // older ciphertext at this place (sealed under a previous file's key), never opens.
+        assert!(open_file_block(&fk, slot + 1, 42, 0, &b).is_err());
+        let older = seal_file_block(&Key::random(), slot, 42, 0, b"older");
+        assert!(open_file_block(&fk, slot, 42, 0, &older).is_err());
         assert_eq!(file_block_count(0), 0);
         assert_eq!(file_block_count(BLOCK_PAYLOAD as u64 + 1), 2);
     }

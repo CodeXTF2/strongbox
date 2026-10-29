@@ -272,10 +272,15 @@ async fn vault_shell(mut drive: strongbox_client::vault::VaultDrive) -> anyhow::
                 }
                 VaultShellCmd::Mkdir { path } => drive.mkdir(&path).await?,
                 VaultShellCmd::Put { files, to } => {
+                    let mut staged = drive.stage();
                     for f in files {
                         eprintln!("{}", f.display());
-                        drive.upload(&f, &to, opts).await?;
+                        drive.upload_staged(&mut staged, &f, &to, opts).await?;
+                        if drive.staged_due(&staged) {
+                            drive.commit_staged(&mut staged).await?;
+                        }
                     }
+                    drive.commit_staged(&mut staged).await?;
                 }
                 VaultShellCmd::Get { remote, local } => {
                     let local = local.unwrap_or_else(|| PathBuf::from(local_safe_name(remote.rsplit('/').next().unwrap_or("download"))));

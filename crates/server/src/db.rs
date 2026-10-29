@@ -224,14 +224,14 @@ impl Db {
         .map(|r| (r.get("vault_id"), r.get("auth_public_key"))))
     }
 
-    /// The member's sealed-channel key, if it has one.
+    /// The member's sealed-channel key (`None`: no such member).
     pub async fn member_transport_key(&self, locator_hash: &[u8]) -> sqlx::Result<Option<Vec<u8>>> {
         Ok(
             sqlx::query("SELECT transport_key FROM vault_members WHERE locator_hash = ?")
                 .bind(locator_hash)
                 .fetch_optional(&self.pool)
                 .await?
-                .and_then(|r| r.get("transport_key")),
+                .map(|r| r.get("transport_key")),
         )
     }
 
