@@ -2034,5 +2034,5 @@ window.addEventListener("error", (ev) => {
   } catch (e) {
     toastError(e);
   }
-  showAuth("create");
+  showAuth("signin");
 })();
