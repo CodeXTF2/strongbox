@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
-use strongbox_server::{build, log_filter, Config};
+use strongbox_server::{build_all, log_filter, Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,9 +23,24 @@ async fn main() -> anyhow::Result<()> {
              hosts, so put a TLS proxy in front and do not expose this port directly"
         );
     }
-    let app = build(config).await?;
+    let admin_listen = config.admin_listen;
+    let (app, admin) = build_all(config).await?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
+    let admin_listener = tokio::net::TcpListener::bind(admin_listen).await?;
     tracing::info!("listening on http://{listen}");
+    tracing::info!(
+        "admin page (invite codes, server stats): open http://{admin_listen}/ in a browser on this machine"
+    );
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(
+            admin_listener,
+            admin.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
+            tracing::error!("admin page stopped: {e}");
+        }
+    });
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

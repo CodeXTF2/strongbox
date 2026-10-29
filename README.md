@@ -128,8 +128,8 @@ flowchart TD
 
 ## Quick start (local)
 
-On Windows, double-click **`start-server.bat`** (open registration on `http://127.0.0.1:8080`,
-data in `strongbox-data\`, a small vault layout; extra arguments such as `--debug` are passed
+On Windows, double-click **`start-server.bat`** (open registration on `http://127.0.0.1:8080`; the first
+start asks for the network interface (a list), the server port and the admin page port; data in `strongbox-data\`, a small vault layout; extra arguments such as `--debug` are passed
 through, and every default can be overridden with the matching `STRONGBOX_*` environment
 variable), then **`start-client.bat`** for the desktop app. **`reset-server.bat`** permanently
 deletes that server data directory after an explicit confirmation. `start-client.bat --soft` uses the
@@ -148,6 +148,22 @@ cargo run -p strongbox-client --bin sbox -- recover --server http://127.0.0.1:80
 # 2b. Desktop app
 cargo run -p strongbox-desktop
 ```
+
+### Invite codes and the admin page
+
+With `--registration invite`, an account needs an invite code: the shared `--invite-token`, or a
+code created on the admin page. The page has its own port (`--admin-listen`, default
+`http://127.0.0.1:4444/`); open it in a browser on the server machine. There you can create and delete **standard** codes (valid for any number of
+accounts until deleted; you may pick the text) and **single-use** codes (generated, and removed the
+moment they admit one account; a failed sign-up does not spend them), and see what the server can
+know: accounts, member keys, signed-in sessions, the vault layout and the full storage allocated
+(`accounts × drives × drive size`: the server cannot see how much of it holds data).
+
+The page has no login of its own. It is a separate listener that must be a loopback address, and it
+is served only to a browser on the same machine: requests that come through a proxy (forwarded
+headers), arrive over a non-loopback connection or carry a foreign `Host` get a 404, so the TLS
+proxy in `deploy/` never exposes it. On a remote server, reach it
+through an SSH tunnel (`ssh -L 4444:127.0.0.1:4444 host`).
 
 ### Vaults (desktop and CLI)
 

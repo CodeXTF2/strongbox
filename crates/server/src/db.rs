@@ -27,6 +27,26 @@ pub enum MemberDelete {
     LastMember,
 }
 
+pub enum CreateVault {
+    Created,
+    /// The username (lookup id) or the first member is already taken.
+    Taken,
+    /// The single-use invite code was spent by someone else in the meantime.
+    InvalidInvite,
+}
+
+pub struct InviteCode {
+    pub id: i64,
+    pub code: String,
+    pub single_use: bool,
+    pub created_at: i64,
+}
+
+pub enum InviteAdd {
+    Added(InviteCode),
+    Exists,
+}
+
 pub enum MemberAdd {
     Added,
     Exists,
@@ -95,8 +115,9 @@ impl Db {
 
     // ---------------- deniable vaults
 
-    /// Create a vault with its username record and first member. `false` if the username
-    /// (lookup id) or the member is taken.
+    /// Create a vault with its username record and first member. If `spend_invite` names a
+    /// single-use code it is deleted in the same transaction, so a code admits exactly one
+    /// account and is not spent when the creation fails.
     pub async fn create_vault(
         &self,
         vault_id: &str,
@@ -104,9 +125,19 @@ impl Db {
         record: &[u8],
         locator_hash: &[u8],
         public_key: &[u8],
-    ) -> sqlx::Result<bool> {
+        spend_invite: Option<i64>,
+    ) -> sqlx::Result<CreateVault> {
         let _w = self.write_lock.lock().await;
         let mut tx = self.pool.begin().await?;
+        if let Some(id) = spend_invite {
+            let spent = sqlx::query("DELETE FROM invite_codes WHERE id = ? AND single_use = 1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            if spent.rows_affected() == 0 {
+                return Ok(CreateVault::InvalidInvite);
+            }
+        }
         sqlx::query("INSERT INTO vaults (id) VALUES (?)")
             .bind(vault_id)
             .execute(&mut *tx)
@@ -127,12 +158,14 @@ impl Db {
         ] {
             match res {
                 Ok(_) => {}
-                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => return Ok(false),
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                    return Ok(CreateVault::Taken)
+                }
                 Err(e) => return Err(e),
             }
         }
         tx.commit().await?;
-        Ok(true)
+        Ok(CreateVault::Created)
     }
 
     /// Delete a deniable account and cascade its lookup and member records.
@@ -263,5 +296,79 @@ impl Db {
             .await?;
         tx.commit().await?;
         Ok(MemberDelete::Deleted)
+    }
+
+    // ---------------- invite codes and operator stats
+
+    /// `(id, single_use)` of a stored invite code.
+    pub async fn find_invite(&self, code: &str) -> sqlx::Result<Option<(i64, bool)>> {
+        Ok(
+            sqlx::query("SELECT id, single_use FROM invite_codes WHERE code = ?")
+                .bind(code)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| (r.get("id"), r.get::<i64, _>("single_use") != 0)),
+        )
+    }
+
+    pub async fn invite_codes(&self) -> sqlx::Result<Vec<InviteCode>> {
+        let rows = sqlx::query(
+            "SELECT id, code, single_use, created_at FROM invite_codes ORDER BY created_at DESC, id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| InviteCode {
+                id: r.get("id"),
+                code: r.get("code"),
+                single_use: r.get::<i64, _>("single_use") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn add_invite(&self, code: &str, single_use: bool) -> sqlx::Result<InviteAdd> {
+        let _w = self.write_lock.lock().await;
+        let created_at = now();
+        match sqlx::query("INSERT INTO invite_codes (code, single_use, created_at) VALUES (?, ?, ?)")
+            .bind(code)
+            .bind(single_use as i64)
+            .bind(created_at)
+            .execute(&self.pool)
+            .await
+        {
+            Ok(r) => Ok(InviteAdd::Added(InviteCode {
+                id: r.last_insert_rowid(),
+                code: code.to_string(),
+                single_use,
+                created_at,
+            })),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(InviteAdd::Exists),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn delete_invite(&self, id: i64) -> sqlx::Result<bool> {
+        let _w = self.write_lock.lock().await;
+        Ok(sqlx::query("DELETE FROM invite_codes WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
+    /// `(accounts, member keys)`: the only counts the server has about its users.
+    pub async fn user_counts(&self) -> sqlx::Result<(i64, i64)> {
+        let vaults: i64 = sqlx::query("SELECT COUNT(*) AS n FROM vaults")
+            .fetch_one(&self.pool)
+            .await?
+            .get("n");
+        let members: i64 = sqlx::query("SELECT COUNT(*) AS n FROM vault_members")
+            .fetch_one(&self.pool)
+            .await?
+            .get("n");
+        Ok((vaults, members))
     }
 }

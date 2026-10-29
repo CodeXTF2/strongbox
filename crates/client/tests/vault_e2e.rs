@@ -14,8 +14,14 @@ const SLOTS: u32 = 4;
 const BLOCKS: u32 = 16;
 
 async fn start_server(data_dir: &Path) -> String {
+    start_server_with_admin(data_dir).await.0
+}
+
+/// Service URL and admin page URL (separate listeners).
+async fn start_server_with_admin(data_dir: &Path) -> (String, String) {
     let config = Config {
         listen: "127.0.0.1:0".parse().unwrap(),
+        admin_listen: "127.0.0.1:1".parse().unwrap(),
         data_dir: data_dir.to_path_buf(),
         registration: RegistrationMode::Invite,
         invite_token: Some("letmein".into()),
@@ -27,18 +33,21 @@ async fn start_server(data_dir: &Path) -> String {
         vault_slot_blocks: Some(BLOCKS),
         drive_size: None,
     };
-    let app = strongbox_server::build(config).await.unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap()
-    });
-    format!("http://{addr}")
+    let (app, admin) = strongbox_server::build_all(config).await.unwrap();
+    let mut urls = Vec::new();
+    for router in [app, admin] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        urls.push(format!("http://{}", listener.local_addr().unwrap()));
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+    }
+    (urls.remove(0), urls.remove(0))
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -523,4 +532,137 @@ async fn key_and_recovery_names_are_unique() {
         .await
         .unwrap(); // own name, new case
     assert_eq!(vault.member_labels().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_codes_and_admin_page() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (url, admin_url) = start_server_with_admin(&tmp.path().join("server")).await;
+    let key: Arc<dyn Authenticator> =
+        Arc::new(SoftAuthenticator::new(tmp.path().join("key1.json")));
+    let http = reqwest::Client::new();
+    let admin = |m: reqwest::Method, path: &str| {
+        http.request(m, format!("{admin_url}{path}"))
+            .header("x-strongbox-admin", "1")
+    };
+
+    // The service port does not serve the admin page at all.
+    assert_eq!(
+        http.get(format!("{url}/admin/stats")).send().await.unwrap().status(),
+        404
+    );
+
+    // The page and API are served to a direct local browser...
+    let page = http.get(format!("{admin_url}/")).send().await.unwrap();
+    assert_eq!(page.status(), 200);
+    assert!(page.text().await.unwrap().contains("Invite codes"));
+
+    // ...but not through a proxy (forwarded headers), under a foreign Host, or without the
+    // custom header on a change.
+    let proxied = http
+        .get(format!("{admin_url}/admin/stats"))
+        .header("x-forwarded-for", "203.0.113.9")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proxied.status(), 404);
+    let rebound = http
+        .get(format!("{admin_url}/admin/stats"))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rebound.status(), 404);
+    let no_header = http
+        .post(format!("{admin_url}/admin/codes"))
+        .json(&serde_json::json!({ "single_use": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_header.status(), 404);
+
+    // A single-use code admits exactly one account and then disappears from the list.
+    let once: serde_json::Value = admin(reqwest::Method::POST, "/admin/codes")
+        .json(&serde_json::json!({ "single_use": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let once_code = once["code"].as_str().unwrap().to_string();
+    create_vault(&url, "first-user-abc", Some(once_code.clone()), key.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        create_vault(&url, "second-user-abc", Some(once_code), key.clone()).await,
+        Err(Error::Api { status: 403, .. })
+    ));
+    let codes: serde_json::Value = admin(reqwest::Method::GET, "/admin/codes")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(codes.as_array().unwrap().is_empty());
+
+    // A failed creation (username taken) does not spend the code.
+    let again: serde_json::Value = admin(reqwest::Method::POST, "/admin/codes")
+        .json(&serde_json::json!({ "single_use": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let again_code = again["code"].as_str().unwrap().to_string();
+    assert!(matches!(
+        create_vault(&url, "first-user-abc", Some(again_code.clone()), key.clone()).await,
+        Err(Error::Api { status: 409, .. })
+    ));
+    create_vault(&url, "third-user-abc", Some(again_code), key.clone())
+        .await
+        .unwrap();
+
+    // Standard codes keep working until deleted.
+    let std: serde_json::Value = admin(reqwest::Method::POST, "/admin/codes")
+        .json(&serde_json::json!({ "single_use": false, "code": "friends-2026" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for name in ["std-user-one-x", "std-user-two-x"] {
+        create_vault(&url, name, Some("friends-2026".into()), key.clone())
+            .await
+            .unwrap();
+    }
+    let del = admin(
+        reqwest::Method::DELETE,
+        &format!("/admin/codes/{}", std["id"]),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(del.status(), 204);
+    assert!(matches!(
+        create_vault(&url, "std-user-three", Some("friends-2026".into()), key.clone()).await,
+        Err(Error::Api { status: 403, .. })
+    ));
+
+    // Stats count accounts and allocated storage.
+    let stats: serde_json::Value = admin(reqwest::Method::GET, "/admin/stats")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stats["accounts"], 4);
+    assert_eq!(
+        stats["allocated_bytes"],
+        4 * SLOTS as u64 * BLOCKS as u64 * 262_144
+    );
 }

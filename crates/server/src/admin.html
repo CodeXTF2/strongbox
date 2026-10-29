@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strongbox server</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #fff; --text: #1b1f27; --muted: #667085; --border: #d8dce3;
+    --accent: #3b5bdb; --accent-text: #fff; --soft: #e8edfb; --danger: #c92a2a; --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --surface: #1c2027; --text: #e7eaf0; --muted: #97a0af; --border: #333a45;
+            --accent: #7c93f0; --accent-text: #11151f; --soft: #232c4a; --danger: #ff8787; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 28px 16px 56px; }
+  h1 { font-size: 22px; margin: 0 0 2px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-top: 18px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+  .stat { background: var(--bg); border-radius: 8px; padding: 12px 14px; }
+  .stat b { display: block; font-size: 22px; font-weight: 650; }
+  .stat span { color: var(--muted); font-size: 12.5px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  input[type=text] { font: inherit; padding: 8px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); min-width: 0; flex: 1 1 220px; }
+  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+  button:hover { background: var(--bg); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.primary:hover { filter: brightness(1.08); }
+  button.danger { color: var(--danger); }
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  th { color: var(--muted); font-weight: 500; font-size: 12.5px; }
+  td.code { font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+  td.actions { text-align: right; white-space: nowrap; }
+  td.actions button { padding: 4px 10px; font-size: 13px; }
+  .tag { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; background: var(--soft); color: var(--accent); }
+  .tag.once { background: transparent; border: 1px solid var(--accent); }
+  .banner { margin-top: 14px; padding: 10px 14px; border-radius: 8px; background: var(--soft); font-size: 13.5px; }
+  .banner.warn { border: 1px solid var(--danger); background: transparent; }
+  #error { color: var(--danger); min-height: 1.4em; margin: 10px 0 0; font-size: 13.5px; }
+  .empty { color: var(--muted); padding: 14px 0 2px; font-size: 14px; }
+  ul.notes { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Strongbox server</h1>
+  <div class="muted" id="subtitle">Loading&hellip;</div>
+  <div class="banner" id="mode-note" hidden></div>
+
+  <section>
+    <h2>Server</h2>
+    <div class="stats" id="stats"></div>
+    <ul class="notes">
+      <li>Storage is the full allocation: every account gets its whole vault when it is created. The server is blind to how much of it holds data.</li>
+      <li>Member keys are the security keys and recovery codes across all accounts. Names, files and per-account usage are not visible to the server.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Invite codes</h2>
+    <div class="muted">Standard codes work any number of times until you delete them. Single-use codes are removed as soon as they admit one account.</div>
+    <div class="row" style="margin-top:14px">
+      <input type="text" id="custom" placeholder="Custom standard code (optional, 8+ characters)" maxlength="64" spellcheck="false" autocomplete="off">
+      <button class="primary" id="new-standard">New standard code</button>
+      <button id="new-once">New single-use code</button>
+    </div>
+    <div id="error" role="alert"></div>
+    <table id="codes" hidden>
+      <thead><tr><th>Code</th><th>Type</th><th>Created</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="no-codes" hidden>No invite codes yet.</div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { "x-strongbox-admin": "1", ...(body ? { "content-type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).message || msg; } catch {}
+    throw new Error(msg);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function bytes(n) {
+  const u = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (Number.isInteger(n) ? n : n.toFixed(n < 10 ? 2 : 1)) + " " + u[i];
+}
+
+function duration(s) {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function stat(value, label) {
+  const box = document.createElement("div");
+  box.className = "stat";
+  const b = document.createElement("b"), s = document.createElement("span");
+  b.textContent = value; s.textContent = label;
+  box.append(b, s);
+  return box;
+}
+
+const MODE_NOTES = {
+  open: ["Registration is open: anyone who can reach the server can create an account, and invite codes are not checked.", true],
+  closed: ["Registration is closed: no one can create an account, whatever codes exist.", true],
+};
+
+async function loadStats() {
+  const s = await api("GET", "/admin/stats");
+  $("#subtitle").textContent = `Version ${s.version} · up ${duration(s.uptime_secs)} · server id ${s.server_id}`;
+  const note = $("#mode-note");
+  const m = MODE_NOTES[s.registration];
+  note.hidden = !m;
+  note.className = "banner warn";
+  if (m) note.textContent = m[0];
+  const el = $("#stats");
+  el.replaceChildren(
+    stat(s.accounts, "Accounts"),
+    stat(bytes(s.allocated_bytes), "Storage allocated"),
+    stat(s.member_keys, "Member keys (keys + recovery codes)"),
+    stat(s.active_sessions, "Signed-in sessions now"),
+    stat(`${s.drives_per_vault} × ${bytes(s.drive_bytes)}`, "Drives per account × drive size"),
+    stat(bytes(s.vault_bytes), "Allocated per account"),
+    stat(s.registration, "Registration mode"),
+    stat(`${s.standard_codes} / ${s.single_use_codes}`, "Standard / single-use codes" + (s.shared_token_set ? " (+ shared token)" : "")),
+  );
+  if (s.missing_storage > 0) {
+    el.append(stat(s.missing_storage, "Accounts with no storage on disk"));
+  }
+}
+
+async function loadCodes() {
+  const codes = await api("GET", "/admin/codes");
+  const body = $("#codes tbody");
+  body.replaceChildren();
+  $("#codes").hidden = !codes.length;
+  $("#no-codes").hidden = codes.length > 0;
+  for (const c of codes) {
+    const tr = document.createElement("tr");
+    const code = document.createElement("td"); code.className = "code"; code.textContent = c.code;
+    const type = document.createElement("td");
+    const tag = document.createElement("span");
+    tag.className = "tag" + (c.single_use ? " once" : "");
+    tag.textContent = c.single_use ? "Single use" : "Standard";
+    type.append(tag);
+    const when = document.createElement("td"); when.className = "muted";
+    when.textContent = new Date(c.created_at * 1000).toLocaleString();
+    const act = document.createElement("td"); act.className = "actions";
+    const copy = document.createElement("button"); copy.textContent = "Copy";
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(c.code); copy.textContent = "Copied"; }
+      catch { copy.textContent = "Select and copy"; }
+      setTimeout(() => (copy.textContent = "Copy"), 1500);
+    };
+    const del = document.createElement("button"); del.className = "danger"; del.textContent = "Delete";
+    del.onclick = () => run(async () => {
+      if (!confirm(`Delete this ${c.single_use ? "single-use" : "standard"} code? It stops working immediately.`)) return;
+      await api("DELETE", "/admin/codes/" + c.id);
+    });
+    act.append(copy, del);
+    tr.append(code, type, when, act);
+    body.append(tr);
+  }
+}
+
+async function refresh() { await Promise.all([loadStats(), loadCodes()]); }
+
+async function run(fn) {
+  $("#error").textContent = "";
+  try { await fn(); await refresh(); }
+  catch (e) { $("#error").textContent = e.message || String(e); }
+}
+
+$("#new-standard").onclick = () => run(async () => {
+  const code = $("#custom").value.trim();
+  await api("POST", "/admin/codes", { single_use: false, code: code || null });
+  $("#custom").value = "";
+});
+$("#new-once").onclick = () => run(() => api("POST", "/admin/codes", { single_use: true }));
+
+run(() => Promise.resolve());
+setInterval(() => refresh().catch(() => {}), 15000);
+</script>
+</body>
+</html>

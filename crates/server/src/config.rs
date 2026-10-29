@@ -11,6 +11,12 @@ pub struct Config {
     #[arg(long, env = "STRONGBOX_LISTEN", default_value = "127.0.0.1:8080")]
     pub listen: SocketAddr,
 
+    /// Address of the operator admin page (invite codes, server stats), opened in a browser on
+    /// the server machine. A separate listener from `--listen`, so a proxy in front of the
+    /// service never reaches it; it must be a loopback address.
+    #[arg(long, env = "STRONGBOX_ADMIN_LISTEN", default_value = "127.0.0.1:4444")]
+    pub admin_listen: SocketAddr,
+
     /// Directory for the metadata database and vault block files.
     #[arg(long, env = "STRONGBOX_DATA_DIR", default_value = "./strongbox-data")]
     pub data_dir: PathBuf,

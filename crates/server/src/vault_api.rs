@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 use strongbox_core::vault::{locator_hash, verify_challenge, RECORD_LEN};
 use strongbox_proto::*;
 
-use crate::api::{check_registration, decoy_bytes, rate_limit, ClientIp};
-use crate::db::{MemberAdd, MemberDelete};
+use crate::api::{check_registration, decoy_bytes, invalid_invite, rate_limit, ClientIp};
+use crate::db::{CreateVault, MemberAdd, MemberDelete};
 use crate::error::{AppError, AppResult};
 use crate::AppState;
 
@@ -46,6 +46,17 @@ pub struct VaultSessions {
 }
 
 impl VaultSessions {
+    /// Unexpired sessions (each is one signed-in member key).
+    pub fn active_count(&self) -> usize {
+        let now = Instant::now();
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|(_, _, exp)| *exp > now)
+            .count()
+    }
+
     pub fn vault_for_token(&self, token_hash: &[u8; 32]) -> Option<String> {
         let sessions = self.sessions.lock().unwrap();
         match sessions.get(token_hash) {
@@ -137,7 +148,7 @@ async fn create_vault(
     Json(req): Json<CreateVaultRequest>,
 ) -> AppResult<(StatusCode, Json<VaultLayout>)> {
     rate_limit(&s, &ip)?;
-    check_registration(&s, req.invite.as_deref())?;
+    let spend_invite = check_registration(&s, req.invite.as_deref()).await?;
     let lh = locator_of(&req.locator)?;
     if req.auth_public_key.len() != 32 {
         return Err(AppError::bad_request("auth_public_key must be 32 bytes"));
@@ -161,7 +172,7 @@ async fn create_vault(
                 AppError::from(e)
             }
         })?;
-    if !s
+    match s
         .db
         .create_vault(
             &vault_id,
@@ -169,11 +180,19 @@ async fn create_vault(
             &req.record,
             &lh,
             &req.auth_public_key,
+            spend_invite,
         )
         .await?
     {
-        let _ = s.vaults.delete(&vault_id);
-        return Err(taken());
+        CreateVault::Created => {}
+        CreateVault::Taken => {
+            let _ = s.vaults.delete(&vault_id);
+            return Err(taken());
+        }
+        CreateVault::InvalidInvite => {
+            let _ = s.vaults.delete(&vault_id);
+            return Err(invalid_invite());
+        }
     }
     Ok((StatusCode::CREATED, Json(s.vaults.layout)))
 }

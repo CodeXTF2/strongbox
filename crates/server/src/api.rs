@@ -34,7 +34,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// Nothing the API returns should be cached by intermediaries or sniffed into something
 /// renderable (blobs are served as raw bytes).
-async fn security_headers(mut res: Response) -> Response {
+pub(crate) async fn security_headers(mut res: Response) -> Response {
     let h = res.headers_mut();
     h.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     h.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -116,26 +116,38 @@ async fn info(State(s): St) -> Json<ServerInfo> {
     })
 }
 
-/// Registration policy shared by accounts and vaults.
-pub(crate) fn check_registration(s: &AppState, invite: Option<&str>) -> AppResult<()> {
+pub(crate) fn invalid_invite() -> AppError {
+    AppError::new(
+        StatusCode::FORBIDDEN,
+        ErrorCode::Forbidden,
+        "invalid invite token",
+    )
+}
+
+/// Registration policy shared by accounts and vaults. In invite mode the code is the shared
+/// `--invite-token` or one of the operator's stored codes. Returns the id of a single-use code,
+/// which the caller must spend (atomically with creating the account).
+pub(crate) async fn check_registration(
+    s: &AppState,
+    invite: Option<&str>,
+) -> AppResult<Option<i64>> {
     match s.config.registration {
-        RegistrationMode::Open => Ok(()),
+        RegistrationMode::Open => Ok(None),
         RegistrationMode::Closed => Err(AppError::new(
             StatusCode::FORBIDDEN,
             ErrorCode::Forbidden,
             "registration is closed",
         )),
         RegistrationMode::Invite => {
-            let ok = matches!((&s.config.invite_token, invite),
-                (Some(want), Some(got)) if constant_time_eq(want.as_bytes(), got.as_bytes()));
-            if ok {
-                Ok(())
-            } else {
-                Err(AppError::new(
-                    StatusCode::FORBIDDEN,
-                    ErrorCode::Forbidden,
-                    "invalid invite token",
-                ))
+            if matches!((&s.config.invite_token, invite),
+                (Some(want), Some(got)) if constant_time_eq(want.as_bytes(), got.as_bytes()))
+            {
+                return Ok(None);
+            }
+            match s.db.find_invite(invite.unwrap_or_default()).await? {
+                Some((id, true)) => Ok(Some(id)),
+                Some((_, false)) => Ok(None),
+                None => Err(invalid_invite()),
             }
         }
     }

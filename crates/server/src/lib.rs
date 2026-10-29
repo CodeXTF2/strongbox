@@ -4,6 +4,7 @@
 //! Ed25519 keys derived client-side from their security keys, and stores whole fixed-size blocks
 //! without knowing which of them are in use.
 
+pub mod admin;
 pub mod api;
 pub mod config;
 pub mod db;
@@ -48,6 +49,7 @@ pub struct AppState {
     pub prelogin_limiter: ratelimit::RateLimiter,
     pub vaults: vaultstore::VaultStore,
     pub vault_sessions: vault_api::VaultSessions,
+    pub started: std::time::Instant,
 }
 
 const BLOCK: u64 = strongbox_core::vault::BLOCK_SIZE as u64;
@@ -134,7 +136,21 @@ fn human(n: u64) -> String {
     }
 }
 
+/// The service router (what clients talk to).
 pub async fn build(config: Config) -> anyhow::Result<Router> {
+    Ok(build_all(config).await?.0)
+}
+
+/// The service router and the admin page router, which belong on separate listeners.
+pub async fn build_all(config: Config) -> anyhow::Result<(Router, Router)> {
+    anyhow::ensure!(
+        config.admin_listen.ip().is_loopback(),
+        "--admin-listen must be a loopback address (the admin page has no login)"
+    );
+    anyhow::ensure!(
+        config.admin_listen != config.listen,
+        "--admin-listen and --listen must be different addresses"
+    );
     DEBUG_LOGGING.store(config.debug, Ordering::Relaxed);
     std::fs::create_dir_all(&config.data_dir)?;
     // The database holds the decoy secret and account metadata: keep it private to the operator.
@@ -181,6 +197,7 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
         db,
         server_id,
         decoy_secret,
+        started: std::time::Instant::now(),
     });
 
     let janitor = state.clone();
@@ -192,5 +209,5 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
         }
     });
 
-    Ok(api::router(state))
+    Ok((api::router(state.clone()), admin::router(state)))
 }
