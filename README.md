@@ -36,7 +36,7 @@ The comic below is a useful reminder that encryption cannot solve every part of 
 
 ### Account to drive flow
 
-The two deniable points are shaded: blue for account ownership, yellow for vault existence.
+The two deniable points are shaded: blue for other accounts on the same key, yellow for vault existence.
 
 ```mermaid
 flowchart TD
@@ -54,9 +54,11 @@ flowchart TD
   class N,S vault
 ```
 
-- **Account ownership:** an unknown username gets a decoy record of the same size, and the key
-  stores nothing, so it cannot list accounts. Showing that a key serves a username means guessing
-  that username offline. Registration reveals whether a name is taken, so keep it invite-only.
+- **Account existence:** not deniable. Registration reveals whether a username is taken, so anyone
+  who can try names can confirm that an account exists. Keep registration invite-only.
+- **Other accounts on the same key:** the deniable part. An unknown username gets a decoy record of
+  the same size, and the key stores nothing that lists accounts, so a seized key and PIN do not
+  show which other usernames it serves. Checking a guessed username means guessing it offline.
 - **Vault existence:** a wrong drive PIN and an unused slot give the same result, message and
   timing, and every slot is filled with random bytes at creation, so used and unused slots look alike.
 
