@@ -25,9 +25,13 @@ indistinguishable, even to someone holding the server, the key and its PIN. See
 The threat model assumes an adversary can obtain or coerce access to the server and the
 security key, including its PIN, all at one point in time, as well as any piece of information
 they can prove you know. Under that combined snapshot, Strongbox is an experiment in making
-other hidden drives difficult to prove. It does not stop coercion or physical force, and its
-claims depend on the assumptions and limits in the [deniable-drive design](docs/deniable-drives.md).
-The comic below is a useful reminder that encryption cannot solve every part of a threat model.
+other hidden drives difficult to prove. This is a mitigation against an adversary who can only
+coerce information they know exists, for example through legal compulsion. Such an adversary
+cannot prove that a hidden drive exists, so they have nothing to compel you to reveal. It does
+not stop an adversary who suspects hidden drives, because deniability cannot prove there is
+nothing more. Its claims depend on the assumptions and limits in the
+[deniable-drive design](docs/deniable-drives.md).
+The comic below shows the kind of problem this design is intended to address.
 
 [![xkcd comic 538, Security](https://imgs.xkcd.com/comics/security.png)](https://xkcd.com/538/)
 
@@ -35,9 +39,9 @@ The comic below is a useful reminder that encryption cannot solve every part of 
 [CC BY-NC 2.5](https://creativecommons.org/licenses/by-nc/2.5/).*
 
 ## User Interface
-<img width="1762" height="1132" alt="image" src="https://github.com/user-attachments/assets/f2a53135-b783-4252-b731-edd5eaace636" />
-<img width="1756" height="1126" alt="image" src="https://github.com/user-attachments/assets/a8d22905-7beb-424b-8ace-becc02fb01e9" />
-<img width="1756" height="1132" alt="image" src="https://github.com/user-attachments/assets/4d442b0b-c2d1-458d-aca4-9cf6daa3e909" />
+<img width="1762" height="1132" alt="Sign-in screen" src="docs/images/sign-in.png" />
+<img width="1756" height="1126" alt="Empty vault view" src="docs/images/vault-empty.png" />
+<img width="1756" height="1132" alt="Vault file list with a file selected" src="docs/images/vault-file.png" />
 
 
 
@@ -219,6 +223,7 @@ unlock method means losing the data. Nobody, including the server operator, can 
 
 - [FidoVault](https://github.com/tmo1/fidovault): a reference for Strongbox's multi-authenticator
   multi-authenticator design.
+- [Deniable encryption](https://en.wikipedia.org/wiki/Deniable_encryption): Made me go down this rabbithole.
 
 ## License
 
