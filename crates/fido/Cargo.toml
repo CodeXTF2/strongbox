@@ -1,0 +1,32 @@
+[package]
+name = "strongbox-fido"
+description = "FIDO2 PRF (hmac-secret) access for Strongbox: Windows WebAuthn API, CTAP-HID, and a test authenticator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Software authenticator for tests and development. NEVER enable in release builds: its
+# secrets sit in a plain file, which defeats the purpose of a hardware key.
+soft = ["dep:serde", "dep:serde_json", "dep:base64", "dep:hmac"]
+
+[dependencies]
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+base64.workspace = true
+windows = { version = "0.58.0", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WindowsWebServices",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+authenticator = { version = "0.5.0", default-features = false, features = ["crypto_rust"] }

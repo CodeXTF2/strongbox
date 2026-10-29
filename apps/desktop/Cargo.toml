@@ -1,0 +1,22 @@
+[package]
+name = "strongbox-desktop"
+description = "Strongbox desktop client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Development only: lets STRONGBOX_SOFT_AUTHENTICATOR select the insecure software key.
+dev-soft-authenticator = ["strongbox-client/soft-authenticator"]
+
+[dependencies]
+strongbox-client.workspace = true
+strongbox-core.workspace = true
+strongbox-fido.workspace = true
+serde.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tokio.workspace = true

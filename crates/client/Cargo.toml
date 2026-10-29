@@ -1,0 +1,37 @@
+[package]
+name = "strongbox-client"
+description = "Strongbox client library and CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sbox"
+path = "src/bin/sbox.rs"
+
+[features]
+soft-authenticator = ["strongbox-fido/soft"]
+
+[dependencies]
+strongbox-core.workspace = true
+strongbox-proto.workspace = true
+strongbox-fido.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+dirs = "5.0.1"
+reqwest.workspace = true
+rpassword.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url = "2.5.2"
+
+[dev-dependencies]
+strongbox-server = { path = "../server" }
+strongbox-fido = { workspace = true, features = ["soft"] }
+tempfile = "3.13.0"
+axum.workspace = true

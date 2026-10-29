@@ -1,0 +1,21 @@
+[Unit]
+Description=Strongbox blind storage server
+After=network-online.target
+
+[Service]
+User=strongbox
+Environment=STRONGBOX_DATA_DIR=/var/lib/strongbox
+Environment=STRONGBOX_LISTEN=127.0.0.1:8080
+Environment=STRONGBOX_REGISTRATION=invite
+# Caddy runs on the same host, so take the client IP from X-Forwarded-For (rate limiting).
+Environment=STRONGBOX_TRUST_PROXY=true
+EnvironmentFile=-/etc/strongbox/env
+ExecStart=/usr/local/bin/strongbox-server
+StateDirectory=strongbox
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

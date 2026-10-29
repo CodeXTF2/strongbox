@@ -1,0 +1,10 @@
+[package]
+name = "strongbox-proto"
+description = "Strongbox client/server API types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+strongbox-core.workspace = true
+serde.workspace = true

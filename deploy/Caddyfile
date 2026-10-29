@@ -1,0 +1,13 @@
+# TLS-terminating reverse proxy for strongbox-server (automatic HTTPS via Let's Encrypt).
+drive.example.org {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+	# No access log: it would record client IPs and request paths (usernames, object ids).
+	# Caddy logs no requests unless a `log` directive is present. For debugging only:
+	#   log {
+	#   	output file /var/log/caddy/strongbox.log {
+	#   		roll_keep_for 24h
+	#   	}
+	#   }
+	reverse_proxy 127.0.0.1:8080
+}
