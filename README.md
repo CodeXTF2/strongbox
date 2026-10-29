@@ -56,7 +56,7 @@ flowchart TD
     K2 -->|"correct"| O["Drive opened<br/>commit wipes old metadata"]
     K2 -->|"wrong PIN or unused slot"| N["Same 'No drive found' error"]
     S["Vault: 100 slots, all random from creation"] -.-> K2
-    O --> B["Fixed-size sealed blocks<br/>names, tree, sizes inside encrypted metadata"]
+    O -->|"stored as"| B["Fixed-size sealed blocks<br/>names, tree, sizes inside encrypted metadata"]
   end
 
   subgraph online["Online attacker"]
