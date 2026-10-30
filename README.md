@@ -4,41 +4,41 @@
 
 # Strongbox
 
-An end-to-end encrypted cloud drive with **deniable hidden drives**, unlocked by a FIDO2 security
-key (YubiKey etc.) and a drive PIN.
+An end-to-end encrypted cloud drive with deniable hidden drives, unlocked by a FIDO2 security key
+(YubiKey etc.) and a drive PIN.
 
-**What it does.** You keep files on a server that can never read them. One security key can
-serve any number of secret usernames. Each username is a **vault** of 100 fixed-size drives, and a
-drive is opened by its slot number and a drive PIN. You can keep a decoy drive with harmless files
-and hidden drives with the real ones. A wrong PIN and an unused slot give the same "No drive
-found", so nobody can prove how many drives you have.
+One security key serves any number of secret usernames. Each username is a vault of 100
+fixed-size drives, opened by slot number and drive PIN. A wrong PIN and an unused slot return the
+same "No drive found", so the number of drives in use cannot be determined.
 
-**Threat model.** The adversary gets one snapshot of an honest server, plus your security key and
-its PIN (the key and PIN are coerced from you). Even then, they cannot tell how many drives are in
-use or prove a hidden drive exists, find your other usernames except by offline Argon2id guessing
-per username, read names, sizes or contents, recover deleted files, or guess drive PINs without
-one physical key touch per guess. A hostile proxy or forged TLS certificate sees only ciphertext.
-Out of scope: multiple snapshots or a recording server, a malicious server, traffic analysis, and
-plaintext you export. That an account exists is not hidden. There are no recovery codes, so losing
-every key means losing the data. This is deniability, not protection from an adversary who merely
-suspects more drives.
+### Threat model
 
-**How it works.**
-- *Keys come from hardware, not a password.* Keys derive from the security key's **hmac-secret /
-  WebAuthn PRF** output, 256 random bits released only after the key's PIN. The drive PIN is
-  mixed into the PRF salt, so each guess costs a key touch and there is nothing to brute-force
-  offline.
-- *Encryption is client-side.* The server holds an encrypted credential record per username and
-  one preallocated file per vault, filled with random bytes at creation. It sees no names, sizes,
+The adversary holds one snapshot of an honest server and the user's security key with its PIN
+(coerced). Given that, it cannot:
+
+- determine how many drives are in use or prove that a hidden drive exists;
+- find other usernames on the key, except by offline Argon2id guessing per username;
+- read names, sizes, counts or contents, or recover deleted files with a coerced drive PIN;
+- guess drive PINs without one physical key touch per guess.
+
+A hostile proxy or forged TLS certificate sees only ciphertext. Out of scope: multiple snapshots or
+a recording server, a malicious server, traffic analysis, and plaintext the user exports. Account
+existence is not hidden. There are no recovery codes: losing every key loses the data.
+
+### Implementation
+
+- Keys derive from the security key's hmac-secret / WebAuthn PRF output (256 random bits, released
+  after the key's PIN). The drive PIN is part of the PRF salt, so each guess needs a key touch.
+- Encryption is client-side. The server stores one encrypted credential record per username and one
+  preallocated file per vault, filled with random bytes at creation. It stores no names, sizes,
   counts or timestamps.
-- *Every drive looks the same.* A slot is 1024 blocks of 256 KiB, and used and unused slots are
-  both random. A used slot's two header copies hold key entries that wrap the drive key and a
-  sealed body. The file tree is one encrypted document, and every file has its own random key.
-- *Commits are copy-on-write.* Old metadata is overwritten with random bytes, so deleted files
-  cannot be recovered even with the PIN.
-- *All API traffic is sealed* in a channel keyed from the security key, independent of TLS.
+- A slot is 1024 blocks of 256 KiB. Used and unused slots are both random. A used slot has two
+  16 KiB header copies: key entries that wrap the drive key, and a sealed body. The file tree is one
+  encrypted document; each file has its own random key.
+- Commits are copy-on-write. Old metadata is overwritten with random bytes.
+- API traffic is sealed in a channel keyed from the security key, independent of TLS.
 
-Full design and limits: [docs/deniable-drives.md](docs/deniable-drives.md).
+Design, formats and limits: [docs/deniable-drives.md](docs/deniable-drives.md).
 
 ## An experiment in deniable encryption
 
