@@ -17,7 +17,7 @@ The adversary has:
 
 - one snapshot of an honest server;
 - the user's security key;
-- any information the user can be shown to know, such as the security key's PIN (coerced).
+- any information they can prove the user to know, such as the security key's PIN.
 
 The adversary cannot:
 
@@ -129,19 +129,18 @@ flowchart TD
   class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 threat
 ```
 
-- **Account existence:** not deniable. Registration reveals whether a username is taken, so anyone
-  who can try names can confirm that an account exists. Keep registration invite-only.
-- **Other accounts on the same key:** the deniable part, under two threat models.
+- **Specific account name existence:** not deniable. Registration reveals whether a username is taken, so anyone
+  who can try names can confirm that an account exists.
+- **Other accounts on the same key:** Deniable, under two threat models.
   - *Seized server, plus key and PIN:* the attacker has the server snapshot. The server stores no
     usernames, only Argon2id-derived lookup ids and records encrypted under keys derived from the
     username. Matching the key means guessing usernames offline: for each candidate, one Argon2id
     run (64 MiB), decrypt the record to get its credential ids, then test them on the key (one
-    touch). A candidate absent from the lookup table is discarded without touching the key. The
-    credentials are non-discoverable, so the key lists nothing.
+    touch per attempt).The credentials are non-discoverable, so the key lists nothing.
   - *Key and PIN only, no server access:* the attacker cannot match the key to any account. The
     credentials are non-discoverable, so the key lists nothing, and without the records there are
     no credential ids to test.
-- **Vault existence:** a wrong drive PIN and an unused slot give the same result, message and
+- **Vault existence:** Deniable, a wrong drive PIN and an unused slot give the same result, message and
   timing, and every slot is filled with random bytes at creation, so used and unused slots look alike.
 
 ## Layout
