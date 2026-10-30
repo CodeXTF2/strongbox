@@ -7,7 +7,7 @@
 An end-to-end encrypted cloud drive with deniable hidden drives, unlocked by a FIDO2 security key
 (YubiKey etc.) and a drive PIN.
 
-One security key serves any number of secret usernames. Each username is a vault of **x**
+A security key can be tied to any number of usernames. Each username is tied to a vault of **x**
 fixed-size drives, opened by slot number and drive PIN. An uninitialized slot is indistinguishable from a used slot without **both** its security key and drive PIN, so the existence of data in a given drive slot cannot be proven (and by extension, knowledge/the existence of the drive PIN).
 
 ### Threat model
