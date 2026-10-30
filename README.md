@@ -13,17 +13,18 @@ same "No drive found", so the number of drives in use cannot be determined.
 
 ### Threat model
 
-The adversary holds one snapshot of an honest server and the user's security key with its PIN
-(coerced). Given that, it cannot:
+The adversary has:
+
+- one snapshot of an honest server;
+- the user's security key;
+- any information the user can be shown to know, such as the security key's PIN (coerced).
+
+The adversary cannot:
 
 - determine how many drives are in use or prove that a hidden drive exists;
 - find other usernames on the key, except by offline Argon2id guessing per username;
 - read names, sizes, counts or contents, or recover deleted files with a coerced drive PIN;
 - guess drive PINs without one physical key touch per guess.
-
-A hostile proxy or forged TLS certificate sees only ciphertext. Out of scope: multiple snapshots or
-a recording server, a malicious server, traffic analysis, and plaintext the user exports. Account
-existence is not hidden. There are no recovery codes: losing every key loses the data.
 
 ### Implementation
 
