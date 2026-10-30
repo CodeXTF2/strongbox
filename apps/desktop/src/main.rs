@@ -63,10 +63,21 @@ async fn install_vault(
     username: String,
     slot: u32,
 ) -> String {
-    let id = format!(
-        "vault-{}",
-        state.next_vault.fetch_add(1, Ordering::Relaxed) + 1
-    );
+    // A slot already open (re-opened, recovered or recreated) keeps its tab: the old drive is
+    // wiped and replaced, so the same slot never shows up twice.
+    let existing = {
+        let vaults = state.vaults.read().await;
+        vaults
+            .iter()
+            .find(|(_, item)| item.slot == slot)
+            .map(|(id, _)| id.clone())
+    };
+    let id = existing.unwrap_or_else(|| {
+        format!(
+            "vault-{}",
+            state.next_vault.fetch_add(1, Ordering::Relaxed) + 1
+        )
+    });
     let wipe = drive.wipe_handle();
     let item = VaultItem {
         session: Arc::new(AsyncMutex::new(VaultSession {
@@ -78,7 +89,9 @@ async fn install_vault(
         client,
         slot,
     };
-    state.vaults.write().await.insert(id.clone(), item);
+    if let Some(previous) = state.vaults.write().await.insert(id.clone(), item) {
+        previous.wipe.wipe();
+    }
     *state.active_vault.write().await = Some(id.clone());
     id
 }
@@ -301,7 +314,7 @@ async fn vault_open(
             .open(&key)
             .await
             .map_err(cerr)?
-            .ok_or("No drive found for that slot and PIN")?
+            .ok_or("No drive found for that slot and passphrase")?
     };
     install_vault(&state, client, drive, server, username, slot).await;
     Ok(())
@@ -564,7 +577,7 @@ async fn vault_rename_member(
     Ok(())
 }
 
-/// Returns how many other keys lost access to the vault (they used the old PIN).
+/// Returns how many other keys lost access to the vault (they used the old passphrase).
 #[tauri::command]
 async fn vault_change_pin(
     app: AppHandle,

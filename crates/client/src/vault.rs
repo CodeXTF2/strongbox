@@ -30,8 +30,9 @@ use crate::api::Api;
 use crate::transfer::{ListEntry, OnConflict, TransferOptions};
 use crate::{Error, Result};
 
-/// WebAuthn relying party id for every credential Strongbox creates.
-pub const DEFAULT_RP_ID: &str = "strongbox.app";
+/// WebAuthn relying party id for every credential Strongbox creates. `.invalid` is reserved
+/// (RFC 6761) and can never be registered, so nobody can take over the domain.
+pub const DEFAULT_RP_ID: &str = "strongbox.invalid";
 
 struct Inner {
     api: Api,

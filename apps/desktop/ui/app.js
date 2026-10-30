@@ -429,7 +429,9 @@ async function finishVaultEntry() {
   }
 }
 
-async function askVaultSlotAndPin(server, { slotTitle = "Vault number", pinTitle = "Vault PIN" } = {}) {
+const PASSPHRASE_ADVICE = "Use a passphrase: several random words, or a long random string. Something you could guess or that follows a pattern is easy to break, however long it is. At least 8 characters.";
+
+async function askVaultSlotAndPin(server, { slotTitle = "Vault number", pinBody = [], pinTitle = "Vault passphrase" } = {}) {
   const count = await invoke("vault_slot_count", { server });
   const max = count - 1;
   const slot = await modal({
@@ -440,7 +442,8 @@ async function askVaultSlotAndPin(server, { slotTitle = "Vault number", pinTitle
   if (slot == null) return null;
   const pin = await modal({
     title: pinTitle,
-    input: { type: "password", label: "Vault PIN" },
+    body: pinBody,
+    input: { type: "password", label: "Vault passphrase" },
     validate: v => v.length >= 8 ? null : "Use at least 8 characters.",
   });
   if (pin == null) return null;
@@ -576,9 +579,12 @@ $("#btn-new-vault-drive").addEventListener("click", async () => {
   if (!state.profile) return;
   if (!(await confirmDialog("Create or reset a vault?", "This permanently replaces the contents of the selected vault number, if it already contains a vault.", "Continue", true))) return;
   let credentials;
-  try { credentials = await askVaultSlotAndPin(state.profile.server_url, { slotTitle: "New vault number", pinTitle: "New vault PIN" }); }
+  try { credentials = await askVaultSlotAndPin(state.profile.server_url, { slotTitle: "New vault number", pinTitle: "New vault passphrase", pinBody: PASSPHRASE_ADVICE }); }
   catch (e) { toastError(e); return; }
   if (!credentials) return;
+  // Recreating a vault that is open here erases it; say so before touching the key.
+  if (state.vaultTabs.some((t) => t.slot === credentials.slot)
+    && !(await confirmDialog(`Erase Vault ${credentials.slot}?`, `Vault ${credentials.slot} is open. Creating it again permanently erases everything in it.`, "Erase and recreate", true))) return;
   try {
     await withKey("Insert your security key, enter its PIN and touch it.", () =>
       invoke("vault_open", { server: state.profile.server_url, username: state.profile.username, ...credentials, create: true }));
@@ -677,8 +683,8 @@ async function renderVaultAccess() {
         if (!key.granted) {
           const pin = await modal({
             title: "Grant access to this vault",
-            body: `Enter this vault's PIN, then insert “${key.label}” and enter that security key's PIN when prompted.`,
-            input: { type: "password", label: "Vault PIN" },
+            body: `Enter this vault's passphrase, then insert “${key.label}” and enter that security key's PIN when prompted.`,
+            input: { type: "password", label: "Vault passphrase" },
             validate: v => v.length >= 8 ? null : "Use at least 8 characters.",
           });
           if (pin == null) return;
@@ -759,21 +765,21 @@ $("#btn-change-vault-pin").addEventListener("click", async () => {
   const pin = el("input", { type: "password", autocomplete: "new-password" });
   const again = el("input", { type: "password", autocomplete: "new-password" });
   const ok = await modal({
-    title: "Change vault PIN",
+    title: "Change vault passphrase",
     body: [
-      el("p", { text: "Choose a new PIN for this vault. Your security key will ask for its PIN and a touch. Other security keys that open this vault will lose access until you grant them again with the new PIN. Recovery codes are not affected." }),
-      el("label", { class: "field", text: "New vault PIN" }, pin),
-      el("label", { class: "field", text: "Repeat new PIN" }, again),
+      el("p", { text: "Choose a new passphrase for this vault. A long, random passphrase of several words is best. Your security key will ask for its PIN and a touch. Other security keys that open this vault will lose access until you grant them again with the new passphrase. Recovery codes are not affected." }),
+      el("label", { class: "field", text: "New vault passphrase" }, pin),
+      el("label", { class: "field", text: "Repeat new passphrase" }, again),
     ],
-    actions: [{ label: "Cancel", value: null }, { label: "Change PIN", value: true, primary: true }],
+    actions: [{ label: "Cancel", value: null }, { label: "Change passphrase", value: true, primary: true }],
   });
   if (!ok) return;
   if (pin.value.length < 8) return toast("Use at least 8 characters.", { type: "error" });
-  if (pin.value !== again.value) return toast("The PINs do not match.", { type: "error" });
+  if (pin.value !== again.value) return toast("The passphrases do not match.", { type: "error" });
   try {
     const revoked = await withKey("Insert the security key you unlocked this vault with, enter its PIN and touch it.", () =>
       call("vault_change_pin", { newPin: pin.value }));
-    toast(revoked ? `Vault PIN changed. ${revoked} other key${revoked === 1 ? " lost" : "s lost"} access until granted again.` : "Vault PIN changed.", { type: "success", timeout: 8000 });
+    toast(revoked ? `Vault passphrase changed. ${revoked} other key${revoked === 1 ? " lost" : "s lost"} access until granted again.` : "Vault passphrase changed.", { type: "success", timeout: 8000 });
   } catch (e) { if (state.unlocked) toastError(e); }
   await renderVaultAccess();
 });
@@ -791,16 +797,16 @@ $("#btn-add-vault-key").addEventListener("click", async () => {
   const ok = await modal({
     title: "Add security key to this vault",
     body: [
-      el("p", { text: "This key will also be added for account sign-in. Enter this vault's PIN, then insert the new key and follow the security key prompts." }),
+      el("p", { text: "This key will also be added for account sign-in. Enter this vault's passphrase, then insert the new key and follow the security key prompts." }),
       el("label", { class: "field", text: "Name" }, name),
-      el("label", { class: "field", text: "Vault PIN" }, pin),
+      el("label", { class: "field", text: "Vault passphrase" }, pin),
     ],
     actions: [{ label: "Cancel", value: null }, { label: "Add key", value: true, primary: true }],
   });
   if (!ok) return;
   if (!name.value.trim() || name.value.trim().length > 80) return toast("Enter a name up to 80 characters.", { type: "error" });
   if (taken.has(name.value.trim().toLowerCase())) return toast("A key or recovery code already has this name.", { type: "error" });
-  if (pin.value.length < 8) return toast("Enter this vault's PIN.", { type: "error" });
+  if (pin.value.length < 8) return toast("Enter this vault's passphrase.", { type: "error" });
   try {
     await withKey("Insert the new security key, enter its key PIN and touch it when prompted.", () =>
       call("vault_add_key_to_current", { label: name.value.trim(), pin: pin.value }));

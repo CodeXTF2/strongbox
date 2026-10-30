@@ -286,7 +286,7 @@ async fn deniable_vault() {
     // A key that is not one of this username's keys cannot log in.
     let stranger: Arc<dyn Authenticator> =
         Arc::new(SoftAuthenticator::new(tmp.path().join("key3.json")));
-    stranger.enroll("strongbox.app", "x", &[]).unwrap();
+    stranger.enroll("strongbox.invalid", "x", &[]).unwrap();
     assert!(connect(&url, USER, stranger, 0, "11111111").await.is_err());
 
     // Helpers the desktop app uses: nested folders, in-memory list/search, folder download, wipe.

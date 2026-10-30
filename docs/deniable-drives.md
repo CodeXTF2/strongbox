@@ -53,7 +53,7 @@ Verified on a YubiKey 5 series, firmware 5.8.0 (`FIDO_2_3`), with a raw CTAP2 pr
 
 These are properties of that key model and firmware. Other authenticators may differ, and
 the Windows WebAuthn API cannot test them at runtime (it always forces a touch). The client
-therefore recommends PIN lengths for the worst case (§7).
+therefore assumes the worst case for guess rate (§7).
 
 ## 3. Overview
 
@@ -92,7 +92,7 @@ server: vault = 100 slots × fixed number of fixed-size blocks, all random from 
   server secret: stable across requests and the same size, so probing usernames online
   reveals nothing. (Creating a vault does reveal whether a username is taken; keep
   registration invite-only.)
-- **Credentials are non-discoverable**, one per (username, key), RP id `strongbox.app`,
+- **Credentials are non-discoverable**, one per (username, key), RP id `strongbox.invalid`,
   `credProtect = 3` (enforced: keys without it are refused), user verification required,
   `user.id` random, `user.name = "Strongbox"`. The key stores nothing; its credential id
   (an encrypted blob only that key can use) lives in the username's record.
@@ -263,17 +263,22 @@ hiding that would need dummy reads and writes across all slots on every session.
 ## 7. Drive PIN guidance
 
 Nothing can count failed drive PINs: the key does not know a guess was wrong, and the server
-cannot know without learning which slots are used. The only limit is the touch: two guesses
-per touch, about 1 touch/s by hand, perhaps 2/s with a robot, on one physical key (no
-parallelism; the secret is inside that key).
+cannot know without learning which slots are used. The only limit is the touch: each guess
+needs a physical touch on that one key (no parallelism; the secret is inside the key), so the
+attacker's rate is bounded by touch speed, roughly 1-2 guesses/s even with a robot.
 
-| Drive PIN | Exhaust one drive at 4 guesses/s | at 2 guesses/s |
-|---|---|---|
-| 6 digits | ~3 days | ~6 days |
-| 8 digits | ~10 months | ~1.6 years |
-| 10 digits | ~80 years | ~160 years |
+The cost of a guess is fixed, so strength comes from the number of candidates the user could
+have chosen, not from the length alone. A PIN picked from a small set (digits, dates, common
+words, keyboard patterns) is weak at any length, because the attacker tries likely values
+first. Only the entropy of the user's actual choice counts, and with a coerced adversary who
+may know the user's habits, assume the likeliest choices are tried first.
 
-The client requires at least 8 digits and recommends 10, or a passphrase.
+Rough budget at 2 guesses/s, about 6 × 10⁷ guesses a year (2²⁶): a uniformly random PIN
+with 30 bits (9 random digits) holds out for years, and 45+ bits (7 random printable
+characters, or a four-word random passphrase) is out of reach in practice.
+
+The client enforces only a minimum length (8 characters, `MIN_DRIVE_PIN_LEN`), which cannot
+measure entropy. It recommends a random passphrase or a long random string.
 
 ## 8. Server (`/v2`)
 
