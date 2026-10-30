@@ -8,8 +8,7 @@ An end-to-end encrypted cloud drive with deniable hidden drives, unlocked by a F
 (YubiKey etc.) and a drive PIN.
 
 One security key serves any number of secret usernames. Each username is a vault of **x**
-fixed-size drives, opened by slot number and drive PIN. A wrong PIN and an unused slot return the
-same "No drive found", so the number of drives in use cannot be determined.
+fixed-size drives, opened by slot number and drive PIN. An uninitialized slot is indistinguishable from a used slot without **both** its security key and drive PIN, so the existence of data in a given drive slot cannot be proven (and by extension, knowledge/the existence of the drive PIN).
 
 ### Threat model
 
