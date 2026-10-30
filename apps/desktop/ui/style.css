@@ -603,3 +603,40 @@ dialog .form-error { margin-top: 12px; }
 .auth-panel > .segmented[role="tablist"] button[aria-selected="true"] { box-shadow: none; color: var(--accent-text); }
 .auth-panel > .segmented[role="tablist"] button:hover:not([aria-selected="true"]) { color: var(--text); }
 @media (prefers-reduced-motion: reduce) { .auth-panel > .segmented[role="tablist"]::before, .auth-panel > .segmented[role="tablist"]::after, .auth-panel > .segmented[role="tablist"] button { transition: none; } }
+
+/* ---------- Motion: view and state transitions ---------- */
+@keyframes view-in { from { opacity: 0; transform: translateY(10px) scale(.992); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fade-out { to { opacity: 0; } }
+@keyframes row-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes tab-in { from { opacity: 0; transform: translateX(-10px); max-height: 0; } to { opacity: 1; transform: none; max-height: 44px; } }
+@keyframes tab-out { from { opacity: 1; max-height: 44px; } to { opacity: 0; transform: translateX(-10px); max-height: 0; } }
+
+/* Sign-in <-> drive (lock, unlock, sign out) */
+.auth-view:not([hidden]), .drive-view:not([hidden]) { animation: view-in .32s cubic-bezier(.2, .7, .2, 1); }
+.drive-view.leaving { animation: none; opacity: 0; transform: scale(.992); filter: blur(3px); transition: opacity .2s ease-in, transform .2s ease-in, filter .2s ease-in; pointer-events: none; }
+#signin-form:not([hidden]), #setup-form:not([hidden]) { animation: rise .24s ease-out; }
+.form-error:not([hidden]) { animation: rise .18s ease-out; }
+
+/* Folder / vault contents */
+.items.enter > * { animation: row-in .22s ease-out backwards; }
+.items.enter > :nth-child(2) { animation-delay: .02s; }
+.items.enter > :nth-child(3) { animation-delay: .04s; }
+.items.enter > :nth-child(4) { animation-delay: .06s; }
+.items.enter > :nth-child(5) { animation-delay: .08s; }
+.items.enter > :nth-child(6) { animation-delay: .1s; }
+.items.enter > :nth-child(n+7) { animation-delay: .12s; }
+.empty:not([hidden]) { animation: rise .24s ease-out; }
+.loading:not([hidden]) { animation: fade-in .2s ease-out; }
+.drop-overlay:not([hidden]) { animation: fade-in .14s ease-out; }
+.transfer { animation: row-in .18s ease-out; }
+
+/* Vault tabs */
+.vault-tab-row { overflow: hidden; }
+.vault-tab-row.entering { animation: tab-in .24s cubic-bezier(.2, .7, .2, 1); }
+.vault-tab-row.leaving { animation: tab-out .18s ease-in forwards; pointer-events: none; }
+.vault-tab, .nav-item { transition: background .15s, color .15s; }
+
+/* Fade-outs for toasts, preview and key-wait */
+.closing { animation: fade-out .15s ease-in forwards !important; pointer-events: none; }
+.preview-stage > * { animation: pop .22s ease-out; }

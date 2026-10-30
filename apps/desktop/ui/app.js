@@ -186,12 +186,32 @@ function previewKind(name) {
   return null;
 }
 
+// ---------------------------------------------------------------- motion
+
+/** Restart a CSS entrance animation on `node` by toggling `cls`. */
+function replay(node, cls = "enter") {
+  node.classList.remove(cls);
+  void node.offsetWidth;
+  node.classList.add(cls);
+}
+
+/** Show or hide `node` with a fade; the content is already wiped by the caller when that matters. */
+function setShown(node, on, ms = 150) {
+  clearTimeout(node._hideTimer);
+  if (on) { node.classList.remove("closing"); node.hidden = false; return; }
+  if (node.hidden) return;
+  node.classList.add("closing");
+  node._hideTimer = setTimeout(() => { node.hidden = true; node.classList.remove("closing"); }, ms);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // ---------------------------------------------------------------- toasts
 
 function toast(message, { type = "info", action = null, timeout = 4500 } = {}) {
   const lead = icon(type === "error" ? "alert" : type === "success" ? "check-circle" : "info", "lead");
   const t = el("div", { class: `toast ${type}`, attrs: { role: type === "error" ? "alert" : "status" } }, lead, el("span", { class: "msg", text: message }));
-  const close = () => { t.remove(); clearTimeout(timer); };
+  const close = () => { clearTimeout(timer); t.classList.add("closing"); setTimeout(() => t.remove(), 160); };
   if (action) t.append(el("button", { class: "btn link sm", text: action.label, onclick: () => { close(); action.fn(); } }));
   t.append(el("button", { class: "icon-btn", attrs: { "aria-label": "Dismiss" }, onclick: close }, icon("x")));
   $("#toasts").append(t);
@@ -284,7 +304,7 @@ function rootName() {
 let keyWaitDepth = 0;
 function keyWait(on, text) {
   keyWaitDepth += on ? 1 : -1;
-  $("#keywait").hidden = keyWaitDepth <= 0;
+  setShown($("#keywait"), keyWaitDepth > 0, 140);
   if (on) $("#keywait-text").textContent = text || "Insert your security key, enter its PIN and touch it when it blinks.";
 }
 async function withKey(text, fn) {
@@ -495,6 +515,7 @@ async function enterDrive() {
   setLayout(state.layout);
   if (hasDrive) {
     await navigate([]);
+    replay($("#items"));
   } else {
     Object.assign(state, { cwd: [], query: "", view: "drive", entries: [], selected: new Set() });
     state.account = null;
@@ -516,6 +537,9 @@ async function lockNow(message) {
   $("#search").value = "";
   transfers.clear();
   state.profile = null;
+  // Keys and decrypted state are already gone; only the empty shell fades out.
+  const drive = $("#view-drive");
+  if (!drive.hidden) { drive.classList.add("leaving"); await sleep(220); drive.classList.remove("leaving"); }
   showAuth();
   if (message) toast(message);
 }
@@ -552,8 +576,12 @@ $("#btn-open-vault-drive").addEventListener("click", async () => {
   } catch (e) { if (state.unlocked) toastError(e); }
 });
 
+const shownVaultTabs = new Set();
+
 function renderVaultTabs() {
   const host = $("#vault-tabs");
+  const seen = new Set(shownVaultTabs);
+  shownVaultTabs.clear();
   host.replaceChildren(...state.vaultTabs.map((tab) => {
     const select = el("button", {
       class: "nav-item vault-tab" + (tab.active ? " active" : ""),
@@ -570,10 +598,12 @@ function renderVaultTabs() {
     const lock = el("button", {
       class: "vault-tab-lock", text: "×", title: `Lock Vault ${tab.slot}`,
       attrs: { "aria-label": `Lock Vault ${tab.slot}`, type: "button" },
-      onclick: async (e) => {
+      onclick: async (ev) => {
+        const row = ev.currentTarget.closest(".vault-tab-row");
         try {
           const remaining = await call("vault_lock", { id: tab.id });
           state.vaultTabs = await call("vault_tabs");
+          if (remaining) { row?.classList.add("leaving"); await sleep(180); }
           if (!remaining) await lockNow();
           else if (tab.active) await enterDrive();
           else renderVaultTabs();
@@ -594,7 +624,8 @@ function renderVaultTabs() {
         openVaultAccess(tab.slot);
       },
     });
-    return el("div", { class: "vault-tab-row" }, select, access, lock);
+    shownVaultTabs.add(tab.id);
+    return el("div", { class: "vault-tab-row" + (seen.has(tab.id) ? "" : " entering") }, select, access, lock);
   }));
 }
 
@@ -828,6 +859,7 @@ async function navigate(parts, { keepSelection = false, select = null } = {}) {
   pruneSelection();
   if (select) selectOnly(joinPath(pathStr(parts), select));
   render();
+  if (changedFolder) replay($("#items"));
   if (changedFolder) $("#content").scrollTop = 0;
   refreshUsage();
 }
@@ -1429,7 +1461,8 @@ let previewSeq = 0;
 let previewBytes = null;
 
 function closePreview() {
-  $("#preview")?.setAttribute("hidden", "");
+  const pv = $("#preview");
+  if (pv) setShown(pv, false, 140);
   $("#preview-stage")?.replaceChildren();
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   // The decrypted file: overwrite our copy rather than leave it for the garbage collector.
@@ -1447,7 +1480,7 @@ async function openPreview(it) {
   const seq = ++previewSeq;
   previewItem = it;
   if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
-  $("#preview").hidden = false;
+  setShown($("#preview"), true);
   $("#preview-name").textContent = it.name;
   $("#preview-icon").replaceChildren(ftype(it.name, false));
   const sibs = previewSiblings(), idx = sibs.indexOf(it);
