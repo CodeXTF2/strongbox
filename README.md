@@ -46,10 +46,8 @@ The threat model assumes the adversary gets the server and the security key with
 one point in time, and can coerce anything they can prove you know. Given that snapshot,
 Strongbox tries to make other hidden drives impossible to prove. That helps against an
 adversary who can only compel information they know exists, such as under legal compulsion:
-they cannot prove a hidden drive exists, so there is nothing to compel. It does not help
-against an adversary who merely suspects hidden drives, since nobody can prove there is
-nothing more. The claims depend on the assumptions and limits in the
-[deniable-drive design](docs/deniable-drives.md). The comic below shows the problem.
+they cannot prove a hidden drive exists, so there is nothing to compel. The claims depend on  
+the assumptions and limits in the [deniable-drive design](docs/deniable-drives.md). The comic below shows the problem.
 
 [![xkcd comic 538, Security](https://imgs.xkcd.com/comics/security.png)](https://xkcd.com/538/)
 
