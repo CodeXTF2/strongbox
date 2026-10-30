@@ -7,7 +7,7 @@
 An end-to-end encrypted cloud drive with deniable hidden drives, unlocked by a FIDO2 security key
 (YubiKey etc.) and a drive PIN.
 
-One security key serves any number of secret usernames. Each username is a vault of 100
+One security key serves any number of secret usernames. Each username is a vault of **x**
 fixed-size drives, opened by slot number and drive PIN. A wrong PIN and an unused slot return the
 same "No drive found", so the number of drives in use cannot be determined.
 
