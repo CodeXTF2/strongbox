@@ -501,16 +501,16 @@ dialog .form-error { margin-top: 12px; }
 
 .settings-body { display: flex; flex-direction: column; gap: 26px; max-height: 70vh; overflow: auto; padding-right: 4px; }
 .settings-body section { display: flex; flex-direction: column; gap: 10px; }
-/* Danger zone: soft red panel inside a thin, uniform yellow and red striped outline. The stripes
+/* Danger zone: soft red panel inside a thin, uniform yellow and black striped outline. The stripes
    are the border-box background showing through a transparent border, so the thickness is the
    same on every side and the rounded corners are kept. */
 .settings-body #settings-danger {
   padding: 16px 14px 14px;
-  border: 3px solid transparent;
+  border: 2px solid transparent;
   border-radius: var(--radius);
   background:
     linear-gradient(var(--danger-soft), var(--danger-soft)) padding-box,
-    repeating-linear-gradient(-45deg, #f2c200 0 8px, var(--danger) 8px 16px) border-box;
+    repeating-linear-gradient(-45deg, #f2c200 0 8px, #111 8px 16px) border-box;
   /* A flex item may shrink inside the capped, scrolling settings body, which squashes and
      clips this section; keep its natural height. */
   flex-shrink: 0;
