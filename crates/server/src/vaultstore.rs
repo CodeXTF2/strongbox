@@ -1,11 +1,14 @@
-//! Storage for deniable vaults: one preallocated file per slot, `blocks × BLOCK_SIZE` bytes.
+//! Storage for deniable vaults: one preallocated file per vault, `slots × blocks × BLOCK_SIZE`
+//! bytes, slot *i* starting at `i × blocks × BLOCK_SIZE`.
 //!
 //! Deniability rules enforced here (docs/deniable-drives.md §8):
 //! - every block is filled with CSPRNG output when the vault is created, from a generator
 //!   seeded by the OS and dropped afterwards, so nobody can later tell filler from data;
 //! - blocks are only ever overwritten in place (no allocation, no growth);
-//! - after every write the file's timestamps are reset to a constant, so file metadata does
-//!   not reveal which slots were written or when.
+//! - after every access the file's atime and mtime are reset to a constant. The inode change
+//!   time (`ctime`) cannot be set, so it still shows when the vault was last touched; that is
+//!   why a vault is a single file: with a file per slot, `ctime` would show which slots were
+//!   ever read or written.
 //!
 //! Filling a vault means writing its whole size in random bytes, which is slow. A few spare
 //! vaults are filled ahead of time in a separate directory and renamed into place at sign-up;
@@ -48,7 +51,7 @@ impl VaultStore {
         for e in std::fs::read_dir(&spares)? {
             let e = e?;
             if e.file_name().to_string_lossy().starts_with(SPARE_FILLING) {
-                std::fs::remove_dir_all(e.path())?;
+                std::fs::remove_file(e.path())?;
             }
         }
         Ok(VaultStore {
@@ -60,17 +63,22 @@ impl VaultStore {
         })
     }
 
-    /// Whether the vault's files are on disk.
+    /// Whether the vault's file is on disk.
     pub fn exists(&self, vault: &str) -> bool {
-        self.dir(vault).is_dir()
+        self.path(vault).is_file()
     }
 
-    fn dir(&self, vault: &str) -> PathBuf {
+    fn path(&self, vault: &str) -> PathBuf {
         self.root.join(vault)
     }
 
-    fn slot_path(&self, vault: &str, slot: u32) -> PathBuf {
-        self.dir(vault).join(slot_file(slot))
+    fn slot_bytes(&self) -> u64 {
+        self.layout.blocks_per_slot as u64 * self.layout.block_size as u64
+    }
+
+    /// Byte offset of block `block` of `slot` in the vault file.
+    fn offset(&self, slot: u32, block: u32) -> u64 {
+        slot as u64 * self.slot_bytes() + block as u64 * self.layout.block_size as u64
     }
 
     fn fix_times(file: &File) -> std::io::Result<()> {
@@ -78,41 +86,36 @@ impl VaultStore {
         file.set_times(FileTimes::new().set_accessed(t).set_modified(t))
     }
 
-    /// Allocate every slot and fill it with random bytes: a spare filled earlier if there is
-    /// one, else now. Slow for big layouts by design (lazy filling would reveal which blocks
-    /// were ever touched).
+    /// Allocate the vault file and fill it with random bytes: a spare filled earlier if there
+    /// is one, else now. Slow for big layouts by design (lazy filling would reveal which
+    /// blocks were ever touched).
     pub fn create(&self, vault: &str) -> std::io::Result<()> {
         if self.take_spare(vault) {
             self.spare_taken.notify_one();
             return Ok(());
         }
-        let dir = self.dir(vault);
-        std::fs::create_dir(&dir)?;
-        self.fill(&dir)
+        self.fill(&self.path(vault))
     }
 
-    /// Fill the slot files of an empty, existing directory; on failure remove the directory.
-    fn fill(&self, dir: &Path) -> std::io::Result<()> {
+    /// Create the vault file at `path` and fill it; on failure remove it.
+    fn fill(&self, path: &Path) -> std::io::Result<()> {
         let result = (|| {
             let mut rng = StdRng::from_entropy();
-            let slot_bytes = self.layout.blocks_per_slot as usize * self.layout.block_size as usize;
-            let mut buf = vec![0u8; (1 << 20).min(slot_bytes)];
-            for slot in 0..self.layout.slots {
-                let mut f = File::create(dir.join(slot_file(slot)))?;
-                let mut left = slot_bytes;
-                while left > 0 {
-                    let n = left.min(buf.len());
-                    rng.fill_bytes(&mut buf[..n]);
-                    f.write_all(&buf[..n])?;
-                    left -= n;
-                }
-                f.sync_all()?;
-                Self::fix_times(&f)?;
+            let total = self.layout.slots as u64 * self.slot_bytes();
+            let mut buf = vec![0u8; (1u64 << 20).min(total) as usize];
+            let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
+            let mut left = total;
+            while left > 0 {
+                let n = left.min(buf.len() as u64) as usize;
+                rng.fill_bytes(&mut buf[..n]);
+                f.write_all(&buf[..n])?;
+                left -= n as u64;
             }
-            Ok(())
+            f.sync_all()?;
+            Self::fix_times(&f)
         })();
         if result.is_err() {
-            let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_file(path);
         }
         result
     }
@@ -126,7 +129,7 @@ impl VaultStore {
         };
         for e in entries.flatten() {
             if e.file_name().to_string_lossy().starts_with(SPARE_READY)
-                && std::fs::rename(e.path(), self.dir(vault)).is_ok()
+                && std::fs::rename(e.path(), self.path(vault)).is_ok()
             {
                 sync_dir(&self.root);
                 return true;
@@ -136,10 +139,22 @@ impl VaultStore {
     }
 
     fn ready_spares(&self) -> std::io::Result<usize> {
-        Ok(std::fs::read_dir(&self.spares)?
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(SPARE_READY))
-            .count())
+        Ok(self.spare_counts()?.0)
+    }
+
+    /// Spares `(ready, being filled)`.
+    pub fn spare_counts(&self) -> std::io::Result<(usize, usize)> {
+        let (mut ready, mut filling) = (0, 0);
+        for e in std::fs::read_dir(&self.spares)?.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(SPARE_READY) {
+                ready += 1;
+            } else if name.starts_with(SPARE_FILLING) {
+                filling += 1;
+            }
+        }
+        Ok((ready, filling))
     }
 
     /// Fill spares until `want` are ready. Blocking; run from a background task.
@@ -147,7 +162,6 @@ impl VaultStore {
         while self.ready_spares()? < want {
             let name = strongbox_core::Id::random().to_string();
             let filling = self.spares.join(format!("{SPARE_FILLING}{name}"));
-            std::fs::create_dir(&filling)?;
             self.fill(&filling)?;
             std::fs::rename(&filling, self.spares.join(format!("{SPARE_READY}{name}")))?;
             sync_dir(&self.spares);
@@ -156,7 +170,7 @@ impl VaultStore {
     }
 
     pub fn delete(&self, vault: &str) -> std::io::Result<()> {
-        std::fs::remove_dir_all(self.dir(vault))
+        std::fs::remove_file(self.path(vault))
     }
 
     fn check(&self, slot: u32, start: u32, count: u32) -> std::io::Result<()> {
@@ -182,8 +196,8 @@ impl VaultStore {
         let mut f = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(self.slot_path(vault, slot))?;
-        f.seek(SeekFrom::Start(start as u64 * bs))?;
+            .open(self.path(vault))?;
+        f.seek(SeekFrom::Start(self.offset(slot, start)))?;
         let mut out = vec![0u8; (count as u64 * bs) as usize];
         f.read_exact(&mut out)?;
         // Reading updates the access time on some filesystems; undo it.
@@ -211,10 +225,10 @@ impl VaultStore {
         let mut f = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(self.slot_path(vault, slot))?;
+            .open(self.path(vault))?;
         let mut out = vec![0u8; headers as usize * len];
         for (b, chunk) in out.chunks_mut(len).enumerate() {
-            f.seek(SeekFrom::Start(b as u64 * bs))?;
+            f.seek(SeekFrom::Start(self.offset(slot, b as u32)))?;
             f.read_exact(chunk)?;
         }
         Self::fix_times(&f)?;
@@ -238,10 +252,8 @@ impl VaultStore {
             ));
         }
         self.check(slot, copy, 1)?;
-        let mut f = OpenOptions::new()
-            .write(true)
-            .open(self.slot_path(vault, slot))?;
-        f.seek(SeekFrom::Start(copy as u64 * bs as u64))?;
+        let mut f = OpenOptions::new().write(true).open(self.path(vault))?;
+        f.seek(SeekFrom::Start(self.offset(slot, copy)))?;
         f.write_all(data)?;
         f.sync_data()?;
         Self::fix_times(&f)
@@ -256,18 +268,12 @@ impl VaultStore {
             ));
         }
         self.check(slot, start, (data.len() / bs) as u32)?;
-        let mut f = OpenOptions::new()
-            .write(true)
-            .open(self.slot_path(vault, slot))?;
-        f.seek(SeekFrom::Start(start as u64 * bs as u64))?;
+        let mut f = OpenOptions::new().write(true).open(self.path(vault))?;
+        f.seek(SeekFrom::Start(self.offset(slot, start)))?;
         f.write_all(data)?;
         f.sync_data()?;
         Self::fix_times(&f)
     }
-}
-
-fn slot_file(slot: u32) -> String {
-    format!("{slot:03}.bin")
 }
 
 /// Make a rename durable (directory entries need their own fsync on Unix).
@@ -322,17 +328,15 @@ mod tests {
         );
         assert!(s.write_header("v1", 1, 2, &[9u8; 10]).is_err());
         assert!(s.write_header("v1", 1, 0, &[9u8; 1025]).is_err());
-        for slot in 0..3 {
-            let m = std::fs::metadata(s.slot_path("v1", slot))
-                .unwrap()
-                .modified()
-                .unwrap();
-            assert_eq!(
-                m,
-                UNIX_EPOCH + FIXED_TIME,
-                "slot {slot} timestamp must not reveal writes"
-            );
-        }
+        let m = std::fs::metadata(s.path("v1")).unwrap().modified().unwrap();
+        assert_eq!(
+            m,
+            UNIX_EPOCH + FIXED_TIME,
+            "timestamp must not reveal writes"
+        );
+        // One file per vault: with a file per slot, ctime would show which slots were used.
+        assert_eq!(std::fs::read_dir(tmp.path().join("v")).unwrap().count(), 1);
+        assert_eq!(std::fs::metadata(s.path("v1")).unwrap().len(), 3 * 4 * 1024);
     }
 
     #[test]
@@ -345,7 +349,8 @@ mod tests {
         };
         let spares = tmp.path().join("s");
         // An interrupted fill is discarded on start.
-        std::fs::create_dir_all(spares.join("fill-x")).unwrap();
+        std::fs::create_dir_all(&spares).unwrap();
+        std::fs::write(spares.join("fill-x"), b"partial").unwrap();
         let s = VaultStore::new(tmp.path().join("v"), spares.clone(), layout).unwrap();
         assert!(!spares.join("fill-x").exists());
         s.fill_spares(2).unwrap();
@@ -358,13 +363,8 @@ mod tests {
         assert_ne!(s.read("b", 0, 0, 2).unwrap(), s.read("c", 0, 0, 2).unwrap());
         assert_ne!(s.read("a", 0, 0, 2).unwrap(), s.read("b", 0, 0, 2).unwrap());
         for v in ["a", "b", "c"] {
-            for slot in 0..2 {
-                let m = std::fs::metadata(s.slot_path(v, slot))
-                    .unwrap()
-                    .modified()
-                    .unwrap();
-                assert_eq!(m, UNIX_EPOCH + FIXED_TIME);
-            }
+            let m = std::fs::metadata(s.path(v)).unwrap().modified().unwrap();
+            assert_eq!(m, UNIX_EPOCH + FIXED_TIME);
         }
     }
 }

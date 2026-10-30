@@ -116,7 +116,7 @@ pub(crate) async fn info(State(s): St) -> Json<ServerInfo> {
     Json(ServerInfo {
         server_id: s.server_id.clone(),
         software_version: env!("CARGO_PKG_VERSION").into(),
-        registration: s.config.registration,
+        registration: s.registration_mode(),
         vault: s.vaults.layout,
     })
 }
@@ -136,7 +136,7 @@ pub(crate) async fn check_registration(
     s: &AppState,
     invite: Option<&str>,
 ) -> AppResult<Option<i64>> {
-    match s.config.registration {
+    match s.registration_mode() {
         RegistrationMode::Open => Ok(None),
         RegistrationMode::Closed => Err(AppError::new(
             StatusCode::FORBIDDEN,

@@ -57,8 +57,11 @@ impl Db {
     pub async fn open(path: &Path) -> anyhow::Result<Self> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
             .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal)
+            // No WAL: deleted rows must not linger in a log file, and `secure_delete` zeroes
+            // freed pages, so a disk snapshot holds no trace of removed members or accounts.
+            .journal_mode(SqliteJournalMode::Delete)
+            .synchronous(SqliteSynchronous::Full)
+            .pragma("secure_delete", "ON")
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(10));
         let pool = SqlitePoolOptions::new()

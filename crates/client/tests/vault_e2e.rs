@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use strongbox_client::vault::{connect, connect_account, connect_with_recovery, create_vault};
+use strongbox_client::vault::{connect, connect_account, create_vault};
 use strongbox_client::{Error, OnConflict, TransferOptions};
 use strongbox_fido::soft::SoftAuthenticator;
 use strongbox_fido::Authenticator;
@@ -61,10 +61,9 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 
 fn vault_files(server_dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
+    // One file per vault, so file metadata (ctime) cannot show which slots were used.
     for v in std::fs::read_dir(server_dir.join("vaults")).unwrap() {
-        for f in std::fs::read_dir(v.unwrap().path()).unwrap() {
-            out.push(f.unwrap().path());
-        }
+        out.push(v.unwrap().path());
     }
     out.sort();
     out
@@ -167,7 +166,6 @@ async fn deniable_vault() {
         .remove("/Evidence/WHISTLEBLOWER-dossier (1).pdf")
         .await
         .unwrap();
-    let code = hidden.new_recovery_code().await.unwrap();
     hidden
         .add_key(backup.clone(), "secret-drive-pin")
         .await
@@ -219,25 +217,19 @@ async fn deniable_vault() {
         assert!(vault2.open(&k).await.unwrap().is_none(), "slot {slot}");
     }
 
-    // The backup key opens it too; so does the recovery code (which finds the slot itself).
+    // The backup key opens it too.
     let (v3, k3) = connect(&url, USER, backup.clone(), 2, "secret-drive-pin")
         .await
         .unwrap();
     assert!(v3.open(&k3).await.unwrap().is_some());
-    let (v4, k4) = connect_with_recovery(&url, USER, &code).await.unwrap();
-    assert_eq!(k4.slot(), 2);
-    assert!(v4.open(&k4).await.unwrap().is_some());
-    assert!(
-        v4.create(&k4).await.is_err(),
-        "recovery codes cannot create drives"
-    );
-    let (members, _) = v4.members().await.unwrap();
-    assert_eq!(members.len(), 3, "key, backup key, recovery code");
+    let (members, _) = v3.members().await.unwrap();
+    assert_eq!(members.len(), 2, "key and backup key");
 
-    // Seized-server view: every slot file has the same size, no plaintext, no names, and
-    // identical timestamps whether or not the slot holds a drive.
+    // Seized-server view: every vault is one file of the same size, no plaintext, no names,
+    // and identical timestamps whatever the slots hold.
     let files = vault_files(&server_dir);
-    assert_eq!(files.len(), 2 * SLOTS as usize, "two usernames, two vaults");
+    assert_eq!(files.len(), 2, "two usernames, two vault files");
+    assert!(files.iter().all(|f| f.is_file()));
     let meta: Vec<_> = files
         .iter()
         .map(|f| std::fs::metadata(f).unwrap())
@@ -374,7 +366,7 @@ async fn missing_vault_storage_is_a_clean_error() {
         .unwrap();
     // The operator deletes the vault files (to reclaim disk space) but not the database.
     for entry in std::fs::read_dir(server_dir.join("vaults")).unwrap() {
-        std::fs::remove_dir_all(entry.unwrap().path()).unwrap();
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
     }
 
     // Signing in still works; opening a drive says the storage is missing instead of a 500.
@@ -417,17 +409,13 @@ async fn change_pin_and_rename_keys() {
     let (vault, k) = connect(&url, USER, key.clone(), 1, OLD).await.unwrap();
     let mut drive = vault.create(&k).await.unwrap();
     drive.mkdir("/kept").await.unwrap();
-    let code = drive.new_recovery_code().await.unwrap();
     drive
         .add_key_named(backup.clone(), OLD, "Backup")
         .await
         .unwrap();
 
-    // The PIN must be a valid one, and a recovery-code session cannot change it.
+    // The PIN must be a valid one.
     assert!(drive.change_pin(key.clone(), "short").await.is_err());
-    let (rv, rk) = connect_with_recovery(&url, USER, &code).await.unwrap();
-    let mut by_code = rv.open(&rk).await.unwrap().unwrap();
-    assert!(by_code.change_pin(key.clone(), NEW).await.is_err());
 
     // The key that opened the drive changes the PIN; the backup key (old PIN) loses access.
     assert_eq!(drive.change_pin(key.clone(), NEW).await.unwrap(), 1);
@@ -446,11 +434,7 @@ async fn change_pin_and_rename_keys() {
         v2.open(&fresh).await.unwrap().is_none(),
         "backup was not re-granted"
     );
-    // The recovery code still opens it.
-    let (rv, rk) = connect_with_recovery(&url, USER, &code).await.unwrap();
-    assert!(rv.open(&rk).await.unwrap().is_some());
-
-    // Keys and recovery codes can be renamed; the new names survive a fresh login.
+    // Keys can be renamed; the new names survive a fresh login.
     let labels = v2.member_labels();
     let backup_id = labels
         .iter()
@@ -472,7 +456,7 @@ async fn change_pin_and_rename_keys() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn key_and_recovery_names_are_unique() {
+async fn key_names_are_unique() {
     let tmp = tempfile::tempdir().unwrap();
     let url = start_server(&tmp.path().join("server")).await;
     let key: Arc<dyn Authenticator> =
@@ -491,35 +475,15 @@ async fn key_and_recovery_names_are_unique() {
     // The first key is "Security key 1", so the next suggestion is "Security key 2".
     assert_eq!(vault.suggest_label("Security key 1", &[]), "Security key 2");
     assert_eq!(vault.suggest_label("Backup key", &[]), "Backup key");
-    drive
-        .new_recovery_code_named("Recovery code")
-        .await
-        .unwrap();
-    assert_eq!(vault.suggest_label("Recovery code", &[]), "Recovery code 2");
-    // Replacing this drive's code may reuse its name.
-    assert_eq!(
-        vault.suggest_label("Recovery code", &drive.recovery_ids()),
-        "Recovery code"
-    );
-    drive
-        .new_recovery_code_named("Recovery code")
-        .await
-        .unwrap();
-
-    // Duplicates (ignoring case and spaces) are refused for keys, recovery codes and renames,
+    // Duplicates (ignoring case and spaces) are refused for keys and renames,
     // before any key is touched.
-    for name in ["Security key 1", "  security KEY 1 ", "recovery code"] {
+    for name in ["Security key 1", "  security KEY 1 "] {
         assert!(drive
             .add_key_named(backup.clone(), "drive-pin-0", name)
             .await
             .is_err());
         assert!(vault
             .add_account_key_named(backup.clone(), name)
-            .await
-            .is_err());
-        assert!(vault.new_account_recovery_code_named(name).await.is_err());
-        assert!(drive
-            .new_recovery_code_named("Security key 1")
             .await
             .is_err());
     }
@@ -536,7 +500,7 @@ async fn key_and_recovery_names_are_unique() {
         .rename_member(&ids[0], "SECURITY KEY 1")
         .await
         .unwrap(); // own name, new case
-    assert_eq!(vault.member_labels().len(), 3);
+    assert_eq!(vault.member_labels().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -682,10 +646,18 @@ async fn invite_codes_and_admin_page() {
         .await
         .unwrap();
     assert_eq!(stats["accounts"], 4);
-    assert_eq!(
-        stats["allocated_bytes"],
-        4 * SLOTS as u64 * BLOCKS as u64 * 262_144
-    );
+    let vault = SLOTS as u64 * BLOCKS as u64 * 262_144;
+    assert_eq!(stats["vault_bytes"], vault);
+    assert_eq!(stats["allocated_bytes"], 4 * vault);
+    assert_eq!(stats["config"]["registration"], "invite");
+    assert_eq!(stats["spares_target"], 0);
+    assert!(stats["disk_free"].as_u64().unwrap() > 0);
+    // The page and its logo are served locally.
+    let logo = admin(reqwest::Method::GET, "/logo.png")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logo.headers()["content-type"], "image/png");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -11,7 +11,7 @@ detect across restarts).
 |---|---|
 | per-vault random id, whole fixed-size blocks | usernames, file or folder names, paths, tree structure |
 | lookup id (Argon2id of the secret username) and a fixed-size encrypted credential record | file timestamps or exact sizes |
-| `H(locator)` and an Ed25519 public key per key or recovery code | contents, PRF outputs, drive PINs, any decryption key |
+| `H(locator)` and an Ed25519 public key per key | contents, PRF outputs, drive PINs, any decryption key |
 | the vault layout (slots × blocks) and server settings | which of a vault's slots are in use |
 
 What it **can** still observe: client IPs, when an account is online, which blocks are read
@@ -20,8 +20,8 @@ members of each. See §4 for mitigations.
 
 ## 2. Current implementation
 
-`crates/server`: Rust, axum, SQLite (WAL) for the small metadata tables, one directory of
-fixed-size slot files per vault, single binary.
+`crates/server`: Rust, axum, SQLite (rollback journal, `secure_delete`) for the small metadata tables, one
+fixed-size file per vault, single binary.
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
@@ -30,13 +30,12 @@ fixed-size slot files per vault, single binary.
 | `POST /v2/channel`, `POST /v2/rpc` | – | sealed channel: every other call below travels inside it (see [deniable-drives.md §8.1](deniable-drives.md#81-sealed-channel)) |
 | `DELETE /v2/vaults` | bearer | delete the account and every drive |
 | `GET /v2/lookup/{id}` | – (rate-limited) | encrypted credential record, or a stable decoy |
-| `PUT /v2/record` | bearer | replace the record (backup keys, recovery codes) |
+| `PUT /v2/record` | bearer | replace the record (backup keys) |
 | `POST /v2/auth/challenge`, `POST /v2/auth/session` | – (rate-limited) | Ed25519 challenge/response, returns a bearer token |
 | `DELETE /v2/auth/session` | bearer | logout |
-| `GET/POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys and recovery codes (the last member cannot be removed) |
+| `GET/POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys (the last member cannot be removed) |
 | `GET/PUT /v2/slots/{slot}/blocks` | bearer | read and write whole blocks |
 | `GET/PUT /v2/slots/{slot}/headers` | bearer | read both header copies, write one |
-| `GET /v2/entries` | bearer | every slot's header entry table (recovery-code login) |
 
 Details of each endpoint are in [deniable-drives.md](deniable-drives.md#8-server-v2).
 
@@ -59,7 +58,7 @@ registration invite-only.
 - TLS only (enforced by the client except on localhost) and HSTS at the proxy.
 - **Sealed channel (done).** TLS is treated as optional protection: after sign-up every API
   call is an XChaCha20-Poly1305 message (`POST /v2/rpc`) under keys derived from a per-member
-  `transport_key` (from the security-key PRF output or recovery code, registered at sign-up).
+  `transport_key` (from the security-key PRF output, registered at sign-up).
   A hostile proxy, or a forged TLS certificate, sees only ciphertext lengths and cannot read,
   alter or replay messages (each counter is accepted once, within a 1024-wide window), nor answer a hello
   (the server must prove it holds the key). Only `/v1/info`, the record lookup, sign-up and the

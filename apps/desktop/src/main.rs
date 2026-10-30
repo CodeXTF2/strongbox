@@ -222,6 +222,13 @@ fn nonempty(s: Option<String>) -> Option<String> {
     s.filter(|s| !s.is_empty())
 }
 
+/// Relying party id for this run. The UI sends it before any key operation; it is fixed by
+/// whatever the key was enrolled with, so it must not change between runs.
+#[tauri::command]
+fn set_rp_id(rp_id: String) -> CmdResult<()> {
+    strongbox_client::vault::set_rp_id(rp_id.trim()).map_err(cerr)
+}
+
 #[tauri::command]
 fn answer_prompt(state: State<'_, AppState>, value: Option<String>) {
     if let Some(tx) = state.prompt.lock().unwrap().take() {
@@ -275,20 +282,6 @@ async fn vault_sign_in(
 }
 
 #[tauri::command]
-async fn vault_account_recover(
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
-    code: String,
-) -> CmdResult<()> {
-    let client = strongbox_client::vault::connect_account_with_recovery(&server, &username, &code)
-        .await
-        .map_err(cerr)?;
-    sign_in_account(&state, client, server, username).await;
-    Ok(())
-}
-
-#[tauri::command]
 async fn vault_open(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -298,6 +291,8 @@ async fn vault_open(
     pin: String,
     create: bool,
 ) -> CmdResult<()> {
+    // Zeroize the passphrase when this command ends.
+    let pin = zeroize::Zeroizing::new(pin);
     let (client, key) = strongbox_client::vault::connect(
         &server,
         &username,
@@ -318,26 +313,6 @@ async fn vault_open(
     };
     install_vault(&state, client, drive, server, username, slot).await;
     Ok(())
-}
-
-#[tauri::command]
-async fn vault_recover(
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
-    code: String,
-) -> CmdResult<u32> {
-    let (client, key) = strongbox_client::vault::connect_with_recovery(&server, &username, &code)
-        .await
-        .map_err(cerr)?;
-    let slot = key.slot();
-    let drive = client
-        .open(&key)
-        .await
-        .map_err(cerr)?
-        .ok_or("Recovery code did not open a drive")?;
-    install_vault(&state, client, drive, server, username, slot).await;
-    Ok(slot)
 }
 
 #[tauri::command]
@@ -362,6 +337,8 @@ async fn vault_add_key_to_current(
     label: String,
     pin: String,
 ) -> CmdResult<()> {
+    // Zeroize the passphrase when this command ends.
+    let pin = zeroize::Zeroizing::new(pin);
     let client = current_vault_client(&state).await?;
     let existing_ids: Vec<_> = client
         .member_labels()
@@ -376,11 +353,7 @@ async fn vault_add_key_to_current(
     let member = client
         .member_labels()
         .into_iter()
-        .find(|member| {
-            member.kind == "security_key"
-                && member.slot.is_none()
-                && !existing_ids.contains(&member.id)
-        })
+        .find(|member| member.kind == "security_key" && !existing_ids.contains(&member.id))
         .ok_or("new security key was added but could not be identified")?;
     sync_vault_clients(&state, &client).await;
     let vault = current_vault(&state).await?;
@@ -394,24 +367,9 @@ async fn vault_add_key_to_current(
     result
 }
 
-#[tauri::command]
-async fn vault_new_account_recovery(
-    state: State<'_, AppState>,
-    label: String,
-) -> CmdResult<String> {
-    let client = current_vault_client(&state).await?;
-    let code = client
-        .new_account_recovery_code_named(&label)
-        .await
-        .map_err(cerr)?;
-    sync_vault_clients(&state, &client).await;
-    Ok(code)
-}
-
 #[derive(Serialize)]
 struct VaultAccessView {
     keys: Vec<VaultAccessKeyView>,
-    recovery_codes: Vec<VaultAccessKeyView>,
 }
 
 #[derive(Serialize)]
@@ -433,7 +391,7 @@ async fn vault_drive_access(state: State<'_, AppState>) -> CmdResult<VaultAccess
     let members = client.member_labels();
     let keys = members
         .iter()
-        .filter(|m| m.kind == "security_key" && m.slot.is_none())
+        .filter(|m| m.kind == "security_key")
         .map(|m| VaultAccessKeyView {
             id: m.id.clone(),
             label: m.label.clone(),
@@ -441,20 +399,7 @@ async fn vault_drive_access(state: State<'_, AppState>) -> CmdResult<VaultAccess
             current: m.id == current,
         })
         .collect();
-    let recovery_codes = members
-        .iter()
-        .filter(|m| m.kind == "recovery_code" && m.slot == Some(drive.slot()))
-        .map(|m| VaultAccessKeyView {
-            id: m.id.clone(),
-            label: m.label.clone(),
-            granted: grants.iter().any(|g| g.member_id == m.id),
-            current: m.id == current,
-        })
-        .collect();
-    Ok(VaultAccessView {
-        keys,
-        recovery_codes,
-    })
+    Ok(VaultAccessView { keys })
 }
 
 #[tauri::command]
@@ -464,6 +409,8 @@ async fn vault_grant_key(
     id: String,
     pin: String,
 ) -> CmdResult<()> {
+    // Zeroize the passphrase when this command ends.
+    let pin = zeroize::Zeroizing::new(pin);
     let v = current_vault(&state).await?;
     let mut session = v.lock().await;
     session
@@ -481,36 +428,6 @@ async fn vault_revoke_key(state: State<'_, AppState>, id: String) -> CmdResult<(
 }
 
 #[tauri::command]
-async fn vault_revoke_recovery(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    let v = current_vault(&state).await?;
-    let mut session = v.lock().await;
-    let client = session.drive.client().clone();
-    session
-        .drive
-        .revoke_recovery_code(&id)
-        .await
-        .map_err(cerr)?;
-    drop(session);
-    sync_vault_clients(&state, &client).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn vault_new_recovery(state: State<'_, AppState>, label: String) -> CmdResult<String> {
-    let v = current_vault(&state).await?;
-    let mut session = v.lock().await;
-    let client = session.drive.client().clone();
-    let code = session
-        .drive
-        .new_recovery_code_named(&label)
-        .await
-        .map_err(cerr)?;
-    drop(session);
-    sync_vault_clients(&state, &client).await;
-    Ok(code)
-}
-
-#[tauri::command]
 async fn vault_members(state: State<'_, AppState>) -> CmdResult<VaultMembersView> {
     let client = current_vault_client(&state).await?;
     let (_, current) = client.members().await.map_err(cerr)?;
@@ -523,7 +440,6 @@ async fn vault_members(state: State<'_, AppState>) -> CmdResult<VaultMembersView
                 id: m.id,
                 label: m.label,
                 kind: m.kind,
-                slot: m.slot,
                 current: is_current,
             }
         })
@@ -541,28 +457,14 @@ struct VaultMemberView {
     id: String,
     label: String,
     kind: String,
-    slot: Option<u32>,
     current: bool,
 }
 
-/// A free name to prefill a key or recovery-code name prompt: `base`, else `base 2`, `base 3`...
-/// With `replaces_vault_recovery`, this vault's current recovery code does not count (a new
-/// one replaces it).
+/// A free name to prefill a key name prompt: `base`, else `base 2`, `base 3`...
 #[tauri::command]
-async fn vault_suggest_label(
-    state: State<'_, AppState>,
-    base: String,
-    replaces_vault_recovery: bool,
-) -> CmdResult<String> {
+async fn vault_suggest_label(state: State<'_, AppState>, base: String) -> CmdResult<String> {
     let client = current_vault_client(&state).await?;
-    let ignore = if replaces_vault_recovery {
-        let v = current_vault(&state).await?;
-        let session = v.lock().await;
-        session.drive.recovery_ids()
-    } else {
-        Vec::new()
-    };
-    Ok(client.suggest_label(&base, &ignore))
+    Ok(client.suggest_label(&base, &[]))
 }
 
 #[tauri::command]
@@ -584,6 +486,8 @@ async fn vault_change_pin(
     state: State<'_, AppState>,
     new_pin: String,
 ) -> CmdResult<usize> {
+    // Zeroize the passphrase when this command ends.
+    let new_pin = zeroize::Zeroizing::new(new_pin);
     let v = current_vault(&state).await?;
     let mut session = v.lock().await;
     session
@@ -1177,20 +1081,16 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             answer_prompt,
+            set_rp_id,
             vault_create_account,
             vault_sign_in,
-            vault_account_recover,
             vault_slot_count,
             vault_open,
-            vault_recover,
             vault_add_account_key,
             vault_add_key_to_current,
-            vault_new_account_recovery,
             vault_drive_access,
             vault_grant_key,
             vault_revoke_key,
-            vault_revoke_recovery,
-            vault_new_recovery,
             vault_members,
             vault_rename_member,
             vault_suggest_label,

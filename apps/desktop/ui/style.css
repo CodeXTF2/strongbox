@@ -10,13 +10,13 @@
   --muted: #6b7382;
   --border: #e3e7ee;
   --border-strong: #cfd5df;
-  --accent: #3a5ccc;
-  --accent-hover: #2442a8;
-  --accent-soft: #e8edfc;
+  --accent: #2d93d2;
+  --accent-hover: #1f78b3;
+  --accent-soft: #e3f3fb;
   --accent-text: #ffffff;
   --hover: #dde2ea;
-  --selected: #cfdbfa;
-  --selected-border: #b9c8f4;
+  --selected: #cde9f7;
+  --selected-border: #b0dbf0;
   --danger: #c93535;
   --danger-soft: #fdecec;
   --success: #1f8a4c;
@@ -27,7 +27,7 @@
   --radius-sm: 7px;
   --radius: 10px;
   --radius-lg: 14px;
-  --ring: 0 0 0 3px rgb(58 92 204 / 25%);
+  --ring: 0 0 0 3px rgb(45 147 210 / 28%);
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Inter", Roboto, sans-serif;
   --mono: "Cascadia Mono", ui-monospace, "SF Mono", Consolas, monospace;
   color-scheme: light;
@@ -58,20 +58,20 @@
     --muted: #8d95a4;
     --border: #262b34;
     --border-strong: #353b47;
-    --accent: #6d8cf0;
-    --accent-hover: #9bb1f8;
-    --accent-soft: #1f2842;
-    --accent-text: #0c1020;
+    --accent: #5bbbe8;
+    --accent-hover: #8dd2f2;
+    --accent-soft: #17313f;
+    --accent-text: #06151d;
     --hover: #2d343f;
-    --selected: #2b3d70;
-    --selected-border: #3a4f8f;
+    --selected: #1f4a61;
+    --selected-border: #2d6683;
     --danger: #f07070;
     --danger-soft: #3a1c1f;
     --success: #4cc27f;
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
     --shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 35%);
     --shadow-lg: 0 4px 8px rgb(0 0 0 / 40%), 0 24px 56px rgb(0 0 0 / 55%);
-    --ring: 0 0 0 3px rgb(109 140 240 / 35%);
+    --ring: 0 0 0 3px rgb(91 187 232 / 35%);
     color-scheme: dark;
   }
 }
@@ -85,20 +85,20 @@
   --muted: #8d95a4;
   --border: #262b34;
   --border-strong: #353b47;
-  --accent: #6d8cf0;
-  --accent-hover: #9bb1f8;
-  --accent-soft: #1f2842;
-  --accent-text: #0c1020;
+  --accent: #5bbbe8;
+  --accent-hover: #8dd2f2;
+  --accent-soft: #17313f;
+  --accent-text: #06151d;
   --hover: #2d343f;
-  --selected: #2b3d70;
-  --selected-border: #3a4f8f;
+  --selected: #1f4a61;
+  --selected-border: #2d6683;
   --danger: #f07070;
   --danger-soft: #3a1c1f;
   --success: #4cc27f;
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
   --shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 35%);
   --shadow-lg: 0 4px 8px rgb(0 0 0 / 40%), 0 24px 56px rgb(0 0 0 / 55%);
-  --ring: 0 0 0 3px rgb(109 140 240 / 35%);
+  --ring: 0 0 0 3px rgb(91 187 232 / 35%);
   color-scheme: dark;
 }
 
@@ -256,11 +256,11 @@ input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
 .auth-panel .segmented { max-width: 420px; }
 .auth-panel .btn.lg { width: 100%; }
 .auth-art { display: grid; place-items: center; padding: 40px; background:
-  radial-gradient(1200px 500px at 80% -10%, rgb(91 126 240 / 22%), transparent 60%),
+  radial-gradient(1200px 500px at 80% -10%, rgb(70 175 225 / 22%), transparent 60%),
   radial-gradient(800px 500px at -10% 110%, rgb(217 72 143 / 12%), transparent 60%), var(--bg); }
 .auth-art { position: relative; overflow: hidden; isolation: isolate; }
 .auth-art::before, .auth-art::after { content: ""; position: absolute; z-index: -1; border-radius: 50%; filter: blur(90px); pointer-events: none; will-change: transform, filter; }
-.auth-art::before { width: 55%; aspect-ratio: 1; top: -15%; right: -10%; background: rgb(91 126 240 / 35%); animation: art-drift-a 5s ease-in-out infinite alternate, art-hue 8s linear infinite; }
+.auth-art::before { width: 55%; aspect-ratio: 1; top: -15%; right: -10%; background: rgb(70 175 225 / 35%); animation: art-drift-a 5s ease-in-out infinite alternate, art-hue 8s linear infinite; }
 .auth-art::after { width: 50%; aspect-ratio: 1; bottom: -20%; left: -10%; background: rgb(217 72 143 / 26%); animation: art-drift-b 6s ease-in-out infinite alternate, art-hue 10s linear infinite reverse; }
 .auth-art .blob { content: ""; position: absolute; z-index: -1; border-radius: 50%; filter: blur(90px); pointer-events: none; will-change: transform, filter; aspect-ratio: 1; }
 .auth-art .b1 { width: 40%; top: 35%; left: 30%; background: rgb(60 190 200 / 26%); animation: art-drift-a 7s ease-in-out infinite alternate-reverse, art-hue 9s linear infinite; }
@@ -279,7 +279,7 @@ input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
 .art-badge svg.ic { width: 28px; height: 28px; }
 @media (max-width: 900px) { .auth-view { grid-template-columns: 1fr; } .auth-art { display: none; } }
 
-  radial-gradient(900px 480px at 50% -10%, rgb(91 126 240 / 18%), transparent 65%), var(--bg); }
+  radial-gradient(900px 480px at 50% -10%, rgb(70 175 225 / 18%), transparent 65%), var(--bg); }
 .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--border-strong); }
 
 /* ---------- Drive layout ---------- */
@@ -531,7 +531,6 @@ dialog .form-error { margin-top: 12px; }
 .key-list li:last-child { border-bottom: none; }
 .key-list li.key-empty { padding: 14px; font-size: 13px; }
 .key-icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
-.key-icon.rec { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
 .key-meta { flex: 1; min-width: 0; }
 .key-label { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .key-sub { font-size: 12.5px; color: var(--muted); }
@@ -582,3 +581,25 @@ dialog .form-error { margin-top: 12px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 
 .btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.auth-view { position: relative; }
+.auth-settings { position: absolute; top: 20px; right: 20px; z-index: 2; width: 44px; height: 44px; border-radius: 12px; }
+.auth-settings svg.ic { width: 24px; height: 24px; }
+
+/* Sign in / Create account switch: a full-width track with a thumb that slides between the two
+   tabs. They are still two buttons; the thumb is only a pseudo-element following aria-selected.
+   Hover tints a layer under the thumb that spans the whole track, so the thumb's rounded corners
+   sit on the tint and the inactive half meets it with no gap. */
+.auth-panel > .segmented[role="tablist"] { position: relative; display: flex; max-width: none; padding: 5px; gap: 0; border-radius: 14px; }
+.auth-panel > .segmented[role="tablist"]::after { content: ""; position: absolute; inset: 5px; border-radius: 9px; z-index: 0; transition: background 0.12s; }
+.auth-panel > .segmented[role="tablist"]:has(button:not([aria-selected="true"]):hover)::after { background: var(--hover); }
+.auth-panel > .segmented[role="tablist"]::before {
+  content: ""; position: absolute; top: 5px; bottom: 5px; left: 5px; width: calc((100% - 10px) / 2);
+  border-radius: 9px; background: var(--accent); box-shadow: var(--shadow-sm); z-index: 1;
+  transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.auth-panel > .segmented[role="tablist"]:has(#tab-create[aria-selected="true"])::before { transform: translateX(100%); }
+.auth-panel > .segmented[role="tablist"] button { position: relative; z-index: 2; background: transparent; padding: 12px 16px; font-size: 15px; font-weight: 600; border-radius: 9px; transition: color 0.18s; }
+.auth-panel > .segmented[role="tablist"] button[aria-selected="true"] { box-shadow: none; color: var(--accent-text); }
+.auth-panel > .segmented[role="tablist"] button:hover:not([aria-selected="true"]) { color: var(--text); }
+@media (prefers-reduced-motion: reduce) { .auth-panel > .segmented[role="tablist"]::before, .auth-panel > .segmented[role="tablist"]::after, .auth-panel > .segmented[role="tablist"] button { transition: none; } }

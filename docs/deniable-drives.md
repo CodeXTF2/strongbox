@@ -4,7 +4,7 @@ Status: implemented in the library, server, CLI and desktop UI; tested with the 
 authenticator only. **Not audited.**
 
 This is Strongbox's only account and storage format: an account is a secret username, its
-security keys and recovery codes, and any number of fixed-size drives.
+security keys, and any number of fixed-size drives.
 
 ## 1. Threat model
 
@@ -38,6 +38,9 @@ Likewise for usernames, under two threat models:
 | Plaintext the user exports | Downloaded files, OS caches, thumbnails, swap. |
 | Coercion game theory | Deniability means the adversary cannot *prove* more drives exist. An adversary who knows the software supports hidden drives may keep coercing anyway. Users must understand this. |
 | Data destruction | An adversary with the key and PIN can "reset" every slot, wiping hidden drives, without learning anything. |
+| Vault-level access time | A vault is one file, so its `ctime` (which cannot be reset) shows when the vault was last read or written, though not which slot. |
+| Filesystems that keep old data | On copy-on-write filesystems (btrfs, ZFS, snapshots) or SSDs that remap blocks, overwritten headers and "wiped" metadata can survive in a disk image. This is the multi-snapshot limit again. Run the server on a filesystem that overwrites in place. |
+| Losing every key | There are no recovery codes (§5). Losing every key that opens a drive, or its passphrase, loses the drive. |
 
 **Honest summary claim:** *deniable against a single seizure of an honest server plus the
 security key and its PIN, without the drive PINs.*
@@ -79,8 +82,8 @@ server: vault = 100 slots × fixed number of fixed-size blocks, all random from 
   salt, so each guess costs one physical touch on that specific key. A wrong PIN and an
   unused slot produce the same result: nothing decrypts.
 - The server never learns which slots are in use, how many drives exist, or anything about
-  their contents. Its only per-vault records are the vault id and the members (security keys
-  and recovery codes) allowed to log in.
+  their contents. Its only per-vault records are the vault id and the members (security keys)
+  allowed to log in.
 
 ## 4. Usernames and the security key
 
@@ -92,7 +95,7 @@ server: vault = 100 slots × fixed number of fixed-size blocks, all random from 
   server secret: stable across requests and the same size, so probing usernames online
   reveals nothing. (Creating a vault does reveal whether a username is taken; keep
   registration invite-only.)
-- **Credentials are non-discoverable**, one per (username, key), RP id `strongbox.invalid`,
+- **Credentials are non-discoverable**, one per (username, key), RP id `strongbox.invalid` by default (configurable at first run in the desktop app, or with `sbox --rp-id` / `STRONGBOX_RP_ID`; it must be the same every time, since credentials and PRF secrets are bound to it),
   `credProtect = 3` (enforced: keys without it are refused), user verification required,
   `user.id` random, `user.name = "Strongbox"`. The key stores nothing; its credential id
   (an encrypted blob only that key can use) lives in the username's record.
@@ -152,16 +155,11 @@ the username.
 The server stores `H(locator)`, the Ed25519 public key and the `transport` key only. Different keys have different `prf_v` and are separate
 **members** of the same vault.
 
-**Account recovery codes** are account members: they can authenticate to the account but
-have no drive entry, so they do not open any drive. **Drive recovery codes** are per drive:
-one 256-bit random secret `R`, shown as 52 base32 characters. Both uses are derived from the
-whole secret under separate labels: the vault member locator and auth key
-(`strongbox/vault/recovery-locator/v1`, `…/recovery-auth/v1`, `…/recovery-transport/v1`) and the drive's recovery entry
-key (`strongbox/drive/recovery-entry/v1`, part `u32be(slot)`). Splitting `R` into halves
-would leave each use at 128 bits, which Grover-style quantum search would reduce to 2^64;
-deriving both from all of `R` keeps each at 256 bits for the same code length. The client
-tries the recovery entry of every slot (100 trial decryptions, no server round trips beyond
-reading the headers). A coerced drive recovery code cannot be used to guess drive PINs offline.
+**There are no recovery codes.** An account recovery code could only log in (it has no drive
+entry), and a drive-scoped one needs a server-visible member and a slot-tagged label in the
+username record, which proves that a drive exists as soon as the username is known (and signing
+in to a decoy requires it). Nothing outside a drive's encrypted header may name a slot. The only
+recovery is a backup security key granted to the drive.
 
 ## 6. Layout and formats
 
@@ -187,7 +185,6 @@ the random filler written when the vault was created, so a header block looks li
 
 ```
 entry[0..8]  key entries      8 × (nonce 24 ‖ AEAD(entry key, drive key 32) ‖ tag 16) = 72 B each
-entry[8]     recovery entry   same format, recovery entry key
 body         nonce ‖ AEAD(KDF(drive key, "strongbox/drive/header/v2"), cbor body, padded) ‖ tag
 ```
 
@@ -197,7 +194,7 @@ is padded to a fixed size (16 KiB less the entries, nonce and tag), so its lengt
 nothing; that leaves room for about 3,000 metadata blocks (750 MiB of metadata).
 
 Body (CBOR): `{ generation: u64, used_entries: u16 bitmask, grants: [(entry, member_id)], meta: { blocks: [u32], len: u64 } }`.
-`used_entries` lets the client add a key or recovery code without overwriting another
+`used_entries` lets the client add a key without overwriting another
 key's entry; `grants` records which account members can open this drive. Both are only
 readable with the drive key.
 
@@ -253,9 +250,7 @@ Opening a drive downloads its two header copies (32 KiB) and its metadata blocks
 one, 256 KiB), whatever the drive's size; the tree is then decrypted and browsed in memory.
 File blocks are fetched only when a file is downloaded or previewed, with a few requests in
 flight at once. A commit re-reads the two header copies, then writes file blocks (for
-uploads), new metadata, one header copy and the wipe of the old metadata. Logging in with a
-recovery code reads the entry table of every slot in one request (about 130 KB with 100
-slots), since the code does not say which slot it opens, then opens the slot it unlocks.
+uploads), new metadata, one header copy and the wipe of the old metadata.
 
 On-demand access is why a live or recording server can see which slot is in use (§1):
 hiding that would need dummy reads and writes across all slots on every session.
@@ -284,18 +279,18 @@ measure entropy. It recommends a random passphrase or a long random string.
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
+| `POST /v2/invite/check` | none | dry-run of the sign-up invite check (spends nothing), so the client rejects a bad code before asking for a key touch |
 | `POST /v2/vaults` | invite/open | create a vault (allocates and fills all slots) with its username record and first member |
 | `GET /v2/lookup/{id}` | – (rate-limited) | encrypted credential record, or a stable decoy |
 | `PUT /v2/record` | bearer | replace this vault's record (backup keys) |
 | `DELETE /v2/vaults` | bearer | delete the account: its record, members and every drive |
 | `POST /v2/auth/challenge` | – | challenge for a locator; unknown locators get an equally random one |
 | `POST /v2/auth/session` | – | Ed25519 signature over the challenge → bearer token |
-| `GET /v2/members`, `POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys / recovery codes (last member cannot be removed) |
+| `GET /v2/members`, `POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys (last member cannot be removed) |
 | `GET /v2/slots/{slot}/blocks?start&count` | bearer | read whole blocks |
 | `PUT /v2/slots/{slot}/blocks?start` | bearer | write whole blocks (body = n × BLOCK) |
 | `GET /v2/slots/{slot}/headers` | bearer | both header copies (`HEADER_LEN` bytes each) |
 | `PUT /v2/slots/{slot}/headers/{copy}` | bearer | replace one header copy (body = `HEADER_LEN` bytes) |
-| `GET /v2/entries` | bearer | the entry table (first `ENTRIES_LEN` bytes of each header copy) of every slot, in slot order: a recovery code finds its drive with one small read instead of two header blocks per slot |
 | `POST /v2/channel`, `POST /v2/rpc` | – | the sealed channel (§8.1) |
 
 Only `GET /v1/info`, `GET /v2/lookup/{id}`, `POST /v2/vaults`, `POST /v2/channel` and
@@ -308,8 +303,8 @@ TLS is treated as optional protection. After sign-up every call is an end-to-end
 and authenticated message, so a hostile HTTP or SOCKS proxy, or a forged TLS certificate,
 sees only ciphertext.
 
-- **Key.** One symmetric `transport` key per member (a security key or a recovery code),
-  derived from its PRF output / recovery secret (§5) and registered with the server at
+- **Key.** One symmetric `transport` key per member (a security key),
+  derived from its PRF output (§5) and registered with the server at
   sign-up (`POST /v2/vaults`, `POST /v2/members`). It is independent of every key that
   protects data: holding it lets the server authenticate and decrypt transport, never a vault.
 - **Authenticated copies of clear data.** The server id and vault layout arrive in the clear
@@ -353,16 +348,20 @@ Deniability requirements on the server:
   keeps `--spare-vaults` (default 1) vaults filled ahead of time in `vault-spares/` and renames
   one into place at sign-up, so creation is instant; a spare is filled exactly like a vault
   filled at sign-up and holds nothing about anyone until it is taken.
+- **One file per vault.** A vault is a single preallocated file (`slots × blocks × BLOCK`
+  bytes). With a file per slot, the inode change time (`ctime`, which userspace cannot set and
+  every read or write updates) would show which slots were ever used.
 - **No ordering or time metadata:** random vault ids, `WITHOUT ROWID` tables, no per-vault
-  counters, no usage accounting (a vault is always "full"). Slot files get a constant
-  modification time after every write. Sessions and challenges live in memory only.
+  counters, no usage accounting (a vault is always "full"). The vault file gets a constant
+  atime and mtime after every access. SQLite runs with `secure_delete` and the rollback journal
+  (no WAL), so deleted members and accounts leave no trace in free pages or a log. Sessions and challenges live in memory only.
 - **No logs** that identify vaults, slots or blocks (default logging mode).
 
 ## 9. Client and device
 
 - Nothing about vaults or drives is written to disk: no profile, no username, no credential
-  id, no version cache. The user signs in with the server URL, username and an account key or
-  account recovery code, then opens individual drives by slot number and drive PIN. The CLI
+  id, no version cache. The user signs in with the server URL, username and an account key,
+  then opens individual drives by slot number and drive PIN. The CLI
   reads the username at a hidden prompt (never from arguments, which end up in shell history).
 - Consequence: no rollback detection across restarts. A server can serve an old header
   generation. Within a session the client rejects generations lower than it has seen.

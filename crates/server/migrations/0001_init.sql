@@ -12,8 +12,8 @@ CREATE TABLE vaults (
     id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 
--- One row per security key or recovery code that can sign in to a vault. `transport_key` is
--- the member's sealed-channel key (derived client-side from its PRF output or recovery code;
+-- One row per security key that can sign in to a vault. `transport_key` is
+-- the member's sealed-channel key (derived client-side from its PRF output;
 -- see strongbox_core::channel). It is independent of every key that protects data, so holding
 -- it lets the server authenticate and decrypt the transport, never a vault.
 CREATE TABLE vault_members (

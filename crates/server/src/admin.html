@@ -4,83 +4,269 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Strongbox server</title>
+<link rel="icon" type="image/png" href="logo.png">
 <style>
+  /* Tokens and components follow the desktop app (apps/desktop/ui/style.css). */
   :root {
-    --bg: #f6f7f9; --surface: #fff; --text: #1b1f27; --muted: #667085; --border: #d8dce3;
-    --accent: #3b5bdb; --accent-text: #fff; --soft: #e8edfb; --danger: #c92a2a; --radius: 10px;
+    --bg: #f4f6f9; --surface: #ffffff; --surface-2: #f8f9fb; --sunken: #eef1f5;
+    --text: #171a21; --text-2: #4a5160; --muted: #6b7382;
+    --border: #e3e7ee; --border-strong: #cfd5df;
+    --accent: #3a5ccc; --accent-hover: #2442a8; --accent-soft: #e8edfc; --accent-text: #ffffff;
+    --hover: #dde2ea; --danger: #c93535; --danger-soft: #fdecec;
+    --success: #1f8a4c; --success-soft: #e6f4ec; --warning: #b7791f; --warning-soft: #fdf3e2;
+    /* Chart series (validated for colour-blind separation on this surface). */
+    --series-1: #3a5ccc; --series-2: #eb6834;
+    --shadow-sm: 0 1px 2px rgb(16 24 40 / 6%);
+    --shadow: 0 1px 3px rgb(16 24 40 / 6%), 0 8px 24px rgb(16 24 40 / 8%);
+    --radius-sm: 7px; --radius: 10px; --radius-lg: 14px;
+    --ring: 0 0 0 3px rgb(58 92 204 / 25%);
+    --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Inter", Roboto, sans-serif;
+    --mono: "Cascadia Mono", ui-monospace, "SF Mono", Consolas, monospace;
+    color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #14171c; --surface: #1c2027; --text: #e7eaf0; --muted: #97a0af; --border: #333a45;
-            --accent: #7c93f0; --accent-text: #11151f; --soft: #232c4a; --danger: #ff8787; }
+    :root {
+      --bg: #0f1115; --surface: #171a20; --surface-2: #1b1f26; --sunken: #12151a;
+      --text: #e7eaf0; --text-2: #c2c8d3; --muted: #8d95a4;
+      --border: #262b34; --border-strong: #353b47;
+      --accent: #6d8cf0; --accent-hover: #9bb1f8; --accent-soft: #1f2842; --accent-text: #0c1020;
+      --hover: #2d343f; --danger: #f07070; --danger-soft: #3a1c1f;
+      --success: #4cc27f; --success-soft: #16291f; --warning: #e0a948; --warning-soft: #2e2516;
+      --series-1: #6d8cf0; --series-2: #d95926;
+      --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+      --shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 35%);
+      --ring: 0 0 0 3px rgb(109 140 240 / 35%);
+      color-scheme: dark;
+    }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
-  main { max-width: 860px; margin: 0 auto; padding: 28px 16px 56px; }
-  h1 { font-size: 22px; margin: 0 0 2px; }
-  h2 { font-size: 16px; margin: 0 0 12px; }
-  .muted { color: var(--muted); font-size: 13px; }
-  section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-top: 18px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
-  .stat { background: var(--bg); border-radius: 8px; padding: 12px 14px; }
-  .stat b { display: block; font-size: 22px; font-weight: 650; }
-  .stat span { color: var(--muted); font-size: 12.5px; }
-  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  input[type=text] { font: inherit; padding: 8px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); min-width: 0; flex: 1 1 220px; }
-  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  button { font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
-  button:hover { background: var(--bg); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-  button.primary:hover { filter: brightness(1.08); }
-  button.danger { color: var(--danger); }
-  table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  [hidden] { display: none !important; }
+  body { margin: 0; font: 14px/1.45 var(--font); background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+  h2 { font-size: 12.5px; font-weight: 600; margin: 0; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  p { margin: 0; }
+  code, .mono { font-family: var(--mono); font-size: 12.5px; }
+  .muted { color: var(--muted); }
+  .note { font-size: 12.5px; color: var(--muted); }
+  svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* Top bar */
+  .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 14px; padding: 11px 28px; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo { width: 42px; height: 27px; flex: none; background: url("logo.png") center / contain no-repeat; }
+  .wordmark { font-weight: 750; letter-spacing: -.02em; font-size: 21px; line-height: 1; }
+  .wordmark b { font-weight: inherit; color: #3f8c93; }
+  .badge { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); }
+  .topbar .meta { margin-left: auto; color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 4px; }
+  .live { width: 8px; height: 8px; border-radius: 50%; background: var(--success); margin-right: 4px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent); }
+  .live.stale { background: var(--muted); box-shadow: none; }
+
+  main { max-width: 1240px; margin: 0 auto; padding: 22px 28px 40px; display: flex; flex-direction: column; gap: 18px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .card-head { display: flex; align-items: center; gap: 8px; }
+  .card-head .count { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--sunken); border-radius: 99px; padding: 1px 8px; }
+  .card-head .aside { margin-left: auto; font-size: 12.5px; color: var(--muted); }
+
+  /* Machine tiles */
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  .tile { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 14px 16px 10px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .tile-head { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px; }
+  .pair .lbl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .pair .lbl i { width: 12px; height: 2px; border-radius: 2px; display: inline-block; }
+  .pair b { display: block; font-size: 20px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .value { font-size: 24px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.25; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .value small { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+  .sub { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  /* margin-top: auto lines the charts up along the bottom of every tile. */
+  .spark { position: relative; height: 54px; margin-top: auto; cursor: crosshair; }
+  .tile .sub { margin-bottom: 10px; }
+  .spark svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .spark .grid { stroke: var(--border); stroke-width: 1; }
+  .spark .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .spark .hair { stroke: var(--border-strong); stroke-width: 1; }
+  .spark .dot { stroke: var(--surface); stroke-width: 2; }
+  .spark .waiting { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--muted); }
+  .span { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .tip { position: absolute; z-index: 5; pointer-events: none; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 7px 10px; font-size: 12px; white-space: nowrap; display: flex; flex-direction: column; gap: 2px; }
+  .tip .t { color: var(--muted); }
+  .tip div { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+  .tip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .tip b { margin-left: auto; padding-left: 10px; font-weight: 600; }
+
+  /* Main layout */
+  .layout { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(300px, 1fr); gap: 18px; align-items: start; }
+  .side { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  @media (max-width: 1060px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .layout { grid-template-columns: 1fr; } }
+
+  .big { font-size: 30px; font-weight: 650; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0; margin-left: 4px; }
+
+  dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; font-size: 13.5px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; min-width: 0; overflow-wrap: anywhere; display: flex; justify-content: flex-end; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+  dd .hint { color: var(--muted); font-size: 12px; }
+  /* Long paths: one line showing the end, full path on hover. */
+  .path { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; min-width: 0; }
+
+  /* Disk bar: 2px surface gaps between segments */
+  .bar { display: flex; gap: 2px; height: 10px; border-radius: 99px; overflow: hidden; background: var(--sunken); }
+  .bar span { display: block; height: 100%; min-width: 0; }
+  .seg-vaults { background: var(--series-1); }
+  .seg-spares { background: color-mix(in srgb, var(--series-1) 45%, var(--surface)); }
+  .seg-other { background: var(--border-strong); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+
+  /* Alerts */
+  .alerts { display: flex; flex-direction: column; gap: 8px; }
+  .alert { display: flex; gap: 12px; align-items: flex-start; padding: 11px 16px; border-radius: var(--radius); border: 1px solid; }
+  .alert svg.ic { margin-top: 2px; width: 18px; height: 18px; }
+  .alert b { font-weight: 600; }
+  .alert p { color: var(--text-2); font-size: 13.5px; }
+  .alert.danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+  .alert.danger svg.ic { color: var(--danger); }
+  .alert.warn { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
+  .alert.warn svg.ic { color: var(--warning); }
+  .alert.info { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+  .alert.info svg.ic { color: var(--accent); }
+  .alert.ok { background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 30%, transparent); padding: 8px 16px; }
+  .alert.ok svg.ic { color: var(--success); }
+
+  /* Buttons and inputs */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; font: inherit; font-weight: 500; padding: 7px 14px; min-height: 34px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); cursor: pointer; white-space: nowrap; transition: background .12s, border-color .12s, box-shadow .12s, color .12s; }
+  .btn:hover { background: var(--hover); }
+  .btn:focus-visible { outline: none; box-shadow: var(--ring); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--text-2); }
+  .btn.ghost:hover { background: var(--hover); color: var(--text); }
+  .btn.danger-ghost { border-color: transparent; background: transparent; color: var(--danger); }
+  .btn.danger-ghost:hover { background: color-mix(in srgb, var(--danger) 18%, transparent); }
+  .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .btn.sm { min-height: 30px; padding: 4px 10px; font-size: 13px; }
+  .btn.icon { min-height: 28px; padding: 4px 6px; }
+  input { font: inherit; font-size: 14px; color: var(--text); padding: 8px 11px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--surface); transition: border-color .12s, box-shadow .12s; min-width: 0; }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+  input[aria-invalid="true"] { border-color: var(--danger); }
+  .create { display: flex; flex-wrap: wrap; gap: 8px; }
+  .create input { flex: 1 1 240px; font-family: var(--mono); font-size: 13px; }
+  .form-error { color: var(--danger); background: var(--danger-soft); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; font-size: 12.5px; }
-  td.code { font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
-  td.actions { text-align: right; white-space: nowrap; }
-  td.actions button { padding: 4px 10px; font-size: 13px; }
-  .tag { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; background: var(--soft); color: var(--accent); }
-  .tag.once { background: transparent; border: 1px solid var(--accent); }
-  .banner { margin-top: 14px; padding: 10px 14px; border-radius: 8px; background: var(--soft); font-size: 13.5px; }
-  .banner.warn { border: 1px solid var(--danger); background: transparent; }
-  #error { color: var(--danger); min-height: 1.4em; margin: 10px 0 0; font-size: 13.5px; }
-  .empty { color: var(--muted); padding: 14px 0 2px; font-size: 14px; }
-  ul.notes { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: var(--surface-2); }
+  td.code { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+  td.code .btn { vertical-align: middle; margin-left: 2px; }
+  td.when { color: var(--muted); white-space: nowrap; font-size: 13px; }
+  td.actions { text-align: right; white-space: nowrap; width: 1%; }
+  .tag { display: inline-block; padding: 1px 9px; border-radius: 99px; font-size: 12px; font-weight: 500; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+  .tag.once { background: var(--sunken); color: var(--text-2); }
+  .empty { color: var(--muted); padding: 22px 0 10px; text-align: center; }
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; }
+  /* Last, so it overrides the rules above at phone width. */
+  @media (max-width: 560px) {
+    .tiles { grid-template-columns: 1fr; }
+    .topbar, main { padding-left: 16px; padding-right: 16px; }
+    .badge { display: none; }
+    .card-head { flex-wrap: wrap; }
+    .card-head .aside { margin-left: 0; width: 100%; }
+    th:nth-child(3), td.when { display: none; }
+    dl { grid-template-columns: 1fr; gap: 2px; }
+    dd { justify-content: flex-start; text-align: left; margin-bottom: 8px; }
+  }
 </style>
 </head>
 <body>
+<header class="topbar">
+  <div class="brand"><span class="logo" aria-hidden="true"></span><span class="wordmark" aria-label="Strongbox">Strong<b>box</b></span></div>
+  <span class="badge">Server admin</span>
+  <div class="meta"><span class="live stale" id="live"></span><span id="meta">Loading&hellip;</span>
+    <button class="btn ghost icon" id="refresh" title="Refresh now" aria-label="Refresh now"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
+  </div>
+</header>
+
 <main>
-  <h1>Strongbox server</h1>
-  <div class="muted" id="subtitle">Loading&hellip;</div>
-  <div class="banner" id="mode-note" hidden></div>
+  <div class="alerts" id="alerts"></div>
 
-  <section>
-    <h2>Server</h2>
-    <div class="stats" id="stats"></div>
-    <ul class="notes">
-      <li>Storage is the full allocation: every account gets its whole vault when it is created. The server is blind to how much of it holds data.</li>
-      <li>Member keys are the security keys and recovery codes across all accounts. Names, files and per-account usage are not visible to the server.</li>
-    </ul>
+  <section class="tiles" aria-label="Machine">
+    <div class="tile" id="t-cpu"></div>
+    <div class="tile" id="t-mem"></div>
+    <div class="tile" id="t-io"></div>
+    <div class="tile" id="t-net"></div>
   </section>
 
-  <section>
-    <h2>Invite codes</h2>
-    <div class="muted">Standard codes work any number of times until you delete them. Single-use codes are removed as soon as they admit one account.</div>
-    <div class="row" style="margin-top:14px">
-      <input type="text" id="custom" placeholder="Custom standard code (optional, 8+ characters)" maxlength="64" spellcheck="false" autocomplete="off">
-      <button class="primary" id="new-standard">New standard code</button>
-      <button id="new-once">New single-use code</button>
+  <div class="layout">
+    <div class="side">
+    <section class="card">
+      <div class="card-head"><h2>Invite codes</h2><span class="count" id="code-count">0</span><span class="aside" id="reg-aside"></span></div>
+      <div class="create" role="group" aria-label="Sign-up mode">
+        <button class="btn" id="mode-invite">Invite only</button>
+        <button class="btn" id="mode-open">Open to anyone</button>
+      </div>
+      <p class="muted">Standard codes admit any number of accounts until you delete them. Single-use codes are deleted when they admit one.</p>
+      <div class="create">
+        <input type="text" id="custom" placeholder="Custom standard code (optional, 8–64 characters)" maxlength="64" spellcheck="false" autocomplete="off">
+        <button class="btn primary" id="new-standard">New standard code</button>
+        <button class="btn" id="new-once">New single-use code</button>
+      </div>
+      <div class="form-error" id="error" role="alert" hidden></div>
+      <table id="codes" hidden>
+        <thead><tr><th>Code</th><th>Type</th><th>Created</th><th><span hidden>Actions</span></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty" id="no-codes" hidden>No invite codes yet.</p>
+      <p class="note" id="token-note" hidden>The shared invite token (<code>--invite-token</code>) is also accepted.</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Configuration</h2><span class="aside">Flags or <code>STRONGBOX_*</code> variables; restart to change (sign-up mode resets on restart)</span></div>
+      <dl id="config"></dl>
+    </section>
     </div>
-    <div id="error" role="alert"></div>
-    <table id="codes" hidden>
-      <thead><tr><th>Code</th><th>Type</th><th>Created</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <div class="empty" id="no-codes" hidden>No invite codes yet.</div>
-  </section>
+
+    <div class="side">
+      <section class="card">
+        <div class="card-head"><h2>Capacity</h2></div>
+        <div><div class="big" id="room">&ndash;</div><p class="note" id="room-note"></p></div>
+        <div class="bar" id="bar" hidden></div>
+        <div class="legend" id="legend" hidden>
+          <span><i class="seg-vaults"></i>Accounts</span><span><i class="seg-spares"></i>Spare vaults</span>
+          <span><i class="seg-other"></i>Other files</span><span><i style="background:var(--sunken);box-shadow:inset 0 0 0 1px var(--border-strong)"></i>Free</span>
+        </div>
+        <dl id="capacity"></dl>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Accounts</h2></div>
+        <dl id="usage"></dl>
+        <p class="note">Each account reserves its whole vault at sign-up. The server cannot see names, files or how much of a vault holds data.</p>
+      </section>
+
+    </div>
+  </div>
+
+  <footer>Strongbox server <span id="version"></span> &middot; server id <span class="mono" id="server-id"></span> &middot; metrics are kept in memory for 15 minutes</footer>
 </main>
+
 <script>
 "use strict";
 const $ = (s) => document.querySelector(s);
+const WINDOW = 15 * 60; // seconds of history the server keeps
+const ICONS = {
+  danger: '<path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
+  warn: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  ok: '<circle cx="12" cy="12" r="10"/><path d="m8 12 3 3 5-6"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>',
+};
+const icon = (name) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+let stats = null, codes = [], codesJson = "", fetchedAt = 0;
+/** The chart under the pointer and where, so a refresh keeps its readout. */
+let hover = null;
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -96,107 +282,300 @@ async function api(method, path, body) {
   return res.status === 204 ? null : res.json();
 }
 
+// ---------- formatting
 function bytes(n) {
   const u = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
   let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return (Number.isInteger(n) ? n : n.toFixed(n < 10 ? 2 : 1)) + " " + u[i];
+  return (i === 0 || Number.isInteger(n) ? n : n.toFixed(n < 10 ? 1 : 0)) + " " + u[i];
 }
-
+const rate = (n) => bytes(n) + "/s";
+const pct = (n) => (n < 10 ? n.toFixed(1) : Math.round(n)) + "%";
 function duration(s) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
-  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+  const parts = d ? [[d, "d"], [h, "h"]] : h ? [[h, "h"], [m, "m"]] : m ? [[m, "m"]] : [[Math.floor(s), "s"]];
+  return parts.filter(([n], i) => i === 0 || n).map(([n, u]) => n + u).join(" ");
+}
+const plural = (n, one, many = one + "s") => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+function el(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "html") e.innerHTML = v; else if (k === "class") e.className = v; else e[k] = v;
+  }
+  e.append(...kids);
+  return e;
 }
 
-function stat(value, label) {
-  const box = document.createElement("div");
-  box.className = "stat";
-  const b = document.createElement("b"), s = document.createElement("span");
-  b.textContent = value; s.textContent = label;
-  box.append(b, s);
-  return box;
+function copyButton(text, label) {
+  const b = el("button", { class: "btn ghost icon", title: label, html: icon("copy") });
+  b.setAttribute("aria-label", label);
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText(text); b.innerHTML = icon("check"); b.style.color = "var(--success)"; }
+    catch { b.title = "Select and copy"; }
+    setTimeout(() => { b.innerHTML = icon("copy"); b.style.color = ""; b.title = label; }, 1400);
+  };
+  return b;
 }
 
-const MODE_NOTES = {
-  open: ["Registration is open: anyone who can reach the server can create an account, and invite codes are not checked.", true],
-  closed: ["Registration is closed: no one can create an account, whatever codes exist.", true],
-};
-
-async function loadStats() {
-  const s = await api("GET", "/admin/stats");
-  $("#subtitle").textContent = `Version ${s.version} · up ${duration(s.uptime_secs)} · server id ${s.server_id}`;
-  const note = $("#mode-note");
-  const m = MODE_NOTES[s.registration];
-  note.hidden = !m;
-  note.className = "banner warn";
-  if (m) note.textContent = m[0];
-  const el = $("#stats");
-  el.replaceChildren(
-    stat(s.accounts, "Accounts"),
-    stat(bytes(s.allocated_bytes), "Storage allocated"),
-    stat(s.member_keys, "Member keys (keys + recovery codes)"),
-    stat(s.active_sessions, "Signed-in sessions now"),
-    stat(`${s.drives_per_vault} × ${bytes(s.drive_bytes)}`, "Drives per account × drive size"),
-    stat(bytes(s.vault_bytes), "Allocated per account"),
-    stat(s.registration, "Registration mode"),
-    stat(`${s.standard_codes} / ${s.single_use_codes}`, "Standard / single-use codes" + (s.shared_token_set ? " (+ shared token)" : "")),
-  );
-  if (s.missing_storage > 0) {
-    el.append(stat(s.missing_storage, "Accounts with no storage on disk"));
+/** Rows of a <dl>: [label, value (string or node), hint?]. */
+function rows(target, list) {
+  target.replaceChildren();
+  for (const [label, value, hint] of list) {
+    const dd = el("dd");
+    dd.append(value instanceof Node ? value : document.createTextNode(value));
+    if (hint) dd.append(el("span", { class: "hint", textContent: hint }));
+    target.append(el("dt", { textContent: label }), dd);
   }
 }
 
-async function loadCodes() {
-  const codes = await api("GET", "/admin/codes");
+// ---------- sparklines
+/**
+ * A 15-minute line chart in `box`. `series`: [{ key, label, color, fmt }]. One y-scale from 0
+ * to `max` (or the largest value). Hovering shows a crosshair and the values at that time.
+ */
+function spark(box, history, series, max, id) {
+  box.replaceChildren();
+  if (history.length < 2) { box.append(el("div", { class: "waiting", textContent: "Collecting…" })); return; }
+  const w = box.clientWidth, h = box.clientHeight, pad = 3;
+  const last = history[history.length - 1].t;
+  // The axis spans the history so far (at least a minute), up to the 15 minutes kept.
+  const span = Math.min(WINDOW, Math.max(60, last - history[0].t));
+  const top = max ?? Math.max(1, ...history.flatMap((d) => series.map((s) => d[s.key])));
+  const x = (t) => w - (last - t) / span * w;
+  const y = (v) => h - pad - Math.min(v, top) / top * (h - 2 * pad);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("aria-hidden", "true");
+  const line = (cls, attrs) => { const e = document.createElementNS(ns, cls === "path" ? "path" : cls); for (const k in attrs) e.setAttribute(k, attrs[k]); svg.append(e); return e; };
+  line("line", { class: "grid", x1: 0, x2: w, y1: h - pad + .5, y2: h - pad + .5 });
+  // Draw the second series first so the first stays on top.
+  for (const s of [...series].reverse()) {
+    const d = history.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p[s.key]).toFixed(1)}`).join("");
+    line("path", { class: "line", d, stroke: s.color });
+  }
+  const hair = line("line", { class: "hair", y1: 0, y2: h, visibility: "hidden" });
+  const dots = series.map((s) => line("circle", { class: "dot", r: 4, fill: s.color, visibility: "hidden" }));
+  box.append(svg);
+  const tip = el("div", { class: "tip", hidden: true });
+  box.append(tip);
+  box.onmouseleave = () => { hover = null; tip.hidden = true; hair.setAttribute("visibility", "hidden"); dots.forEach((d) => d.setAttribute("visibility", "hidden")); };
+  box.onmousemove = (ev) => {
+    hover = { id, clientX: ev.clientX };
+    const r = box.getBoundingClientRect();
+    const t = last - (w - (ev.clientX - r.left)) / w * span;
+    let p = history[0];
+    for (const q of history) if (Math.abs(q.t - t) < Math.abs(p.t - t)) p = q;
+    const px = x(p.t);
+    hair.setAttribute("x1", px); hair.setAttribute("x2", px); hair.setAttribute("visibility", "visible");
+    series.forEach((s, i) => { dots[i].setAttribute("cx", px); dots[i].setAttribute("cy", y(p[s.key])); dots[i].setAttribute("visibility", "visible"); });
+    const when = new Date(fetchedAt - (stats.uptime_secs - p.t) * 1000);
+    tip.replaceChildren(el("span", { class: "t", textContent: when.toLocaleTimeString() }),
+      ...series.map((s) => el("div", {}, el("i", { style: `background:${s.color}` }), s.label, el("b", { textContent: s.fmt(p[s.key]) }))));
+    tip.hidden = false;
+    const left = Math.min(Math.max(px + 12, 0), w - tip.offsetWidth);
+    tip.style.left = (px + 12 + tip.offsetWidth > w ? px - tip.offsetWidth - 12 : left) + "px";
+    tip.style.top = (-tip.offsetHeight - 6) + "px";
+  };
+  if (hover?.id === id) box.onmousemove(hover);
+  return span;
+}
+
+/**
+ * A machine tile: title, headline, sub line and sparkline. With one series the headline is
+ * `value`; with two, each series' current value is shown under its own label, which doubles
+ * as the chart's legend.
+ */
+function tile(id, title, value, sub, history, series, max) {
+  const box = $(id);
+  const now = history[history.length - 1];
+  const head = series.length > 1
+    ? el("div", { class: "pair" }, ...series.map((s) => el("div", {},
+        el("span", { class: "lbl" }, el("i", { style: `background:${s.color}` }), s.label),
+        el("b", { textContent: now ? s.fmt(now[s.key]) : "–" }))))
+    : el("div", { class: "value", html: value });
+  const chart = el("div", { class: "spark" });
+  const since = el("span");
+  box.replaceChildren(el("h2", { textContent: title }), head, el("div", { class: "sub", textContent: sub }), chart,
+    el("div", { class: "span" }, since, el("span", { textContent: "now" })));
+  const span = spark(chart, history, series, max, id);
+  since.textContent = span ? duration(span) + " ago" : "";
+}
+
+function renderTiles() {
+  const m = stats.metrics, hist = m.history, now = hist[hist.length - 1];
+  const css = getComputedStyle(document.documentElement);
+  const c1 = css.getPropertyValue("--series-1").trim(), c2 = css.getPropertyValue("--series-2").trim();
+  const memPct = hist.map((p) => ({ ...p, mem_pct: m.mem_total ? 100 * p.mem_used / m.mem_total : 0 }));
+  tile("#t-cpu", "CPU", "", now ? plural(m.cpus, "core") : "",
+    hist, [{ key: "cpu", label: "Machine", color: c1, fmt: pct }, { key: "cpu_self", label: "Strongbox", color: c2, fmt: pct }], 100);
+  tile("#t-mem", "Memory", now ? `${pct(100 * now.mem_used / m.mem_total)} <small>of ${bytes(m.mem_total)}</small>` : "&ndash;",
+    now ? `${bytes(now.mem_used)} used · Strongbox ${bytes(now.mem_self)}` : "",
+    memPct, [{ key: "mem_pct", label: "Used", color: c1, fmt: pct }], 100);
+  tile("#t-io", "Server I/O", "", `Since start: ${bytes(m.io_read_total)} read · ${bytes(m.io_write_total)} written`,
+    hist, [{ key: "io_read", label: "Read", color: c1, fmt: rate }, { key: "io_write", label: "Written", color: c2, fmt: rate }]);
+  tile("#t-net", "Network", "", "All interfaces except loopback",
+    hist, [{ key: "net_rx", label: "In", color: c1, fmt: rate }, { key: "net_tx", label: "Out", color: c2, fmt: rate }]);
+}
+
+// ---------- server panels
+/** About how many more accounts fit: ready spare vaults plus whole vaults in the free space. */
+function room(s) {
+  return s.disk_free == null ? null : s.spares_ready + Math.floor(s.disk_free / s.vault_bytes);
+}
+
+function renderAlerts() {
+  const s = stats, out = [], c = s.config, r = room(s), cpu = s.metrics.history.slice(-12);
+  if (c.debug) out.push(["danger", "Debug logging is on.", "Logs include usernames, ids and request paths. Restart without --debug once you are done."]);
+  if (c.registration === "open") out.push(["danger", "Registration is open.", `Anyone who can reach the server can create an account, and each reserves ${bytes(s.vault_bytes)} of disk. Switch to invite only in the Invite codes panel unless only people you trust can reach it.`]);
+  if (r === 0) out.push(["danger", "No room for another account.", `Each account needs ${bytes(s.vault_bytes)} and only ${bytes(s.disk_free)} is free, so sign-ups will fail.`]);
+  else if (r !== null && r <= 3) out.push(["warn", `Room for only ${plural(r, "more account")}.`, `Each account needs ${bytes(s.vault_bytes)}; ${bytes(s.disk_free)} is free.`]);
+  if (s.missing_storage > 0) out.push(["warn", `${plural(s.missing_storage, "account has", "accounts have")} no vault files.`, "Their owners can sign in but cannot open drives; they can delete the account in the app and sign up again."]);
+  if (cpu.length >= 12 && cpu.every((p) => p.cpu > 90)) out.push(["warn", "CPU has been above 90% for a minute.", "Transfers and sign-ins will be slow."]);
+  if (c.registration === "closed") out.push(["info", "Registration is closed.", "Nobody can create an account; invite codes are not accepted."]);
+  if (c.registration === "invite" && !codes.length && !c.invite_token_set) out.push(["info", "Nobody can sign up yet.", "Create an invite code below and give it to the person signing up."]);
+  const box = $("#alerts");
+  box.replaceChildren();
+  if (!out.length) out.push(["ok", "Everything looks fine.", ""]);
+  for (const [kind, title, text] of out) {
+    const p = el("p", {}, el("b", { textContent: title }), text ? " " + text : "");
+    box.append(el("div", { class: "alert " + kind, role: kind === "ok" ? "status" : "alert", html: icon(kind) }, p));
+  }
+}
+
+function renderPanels() {
+  const s = stats, c = s.config;
+  $("#meta").textContent = `v${s.version} · up ${duration(s.uptime_secs)}`;
+  $("#version").textContent = "v" + s.version;
+  $("#server-id").textContent = s.server_id;
+
+  // Capacity
+  const r = room(s);
+  $("#room").innerHTML = r === null ? "Unknown" : `${r.toLocaleString()}<small>more ${r === 1 ? "account" : "accounts"} fit</small>`;
+  $("#room-note").textContent = r === null ? "Free disk space could not be read." : "in the free disk space, counting spare vaults that are ready.";
+  const onDisk = (s.accounts - s.missing_storage) * s.vault_bytes;
+  const spares = s.spares_ready * s.vault_bytes;
+  const known = s.disk_total != null && s.disk_free != null && s.disk_total > 0;
+  $("#bar").hidden = $("#legend").hidden = !known;
+  if (known) {
+    const other = Math.max(0, s.disk_total - s.disk_free - onDisk - spares - s.db_bytes);
+    const w = (n) => (100 * n / s.disk_total).toFixed(3) + "%";
+    const segs = [["seg-vaults", "Accounts", onDisk + s.db_bytes], ["seg-spares", "Spare vaults", spares], ["seg-other", "Other files", other]];
+    $("#bar").replaceChildren(...segs.filter(([, , n]) => n > 0).map(([cls, label, n]) =>
+      el("span", { class: cls, title: `${label}: ${bytes(n)}`, style: `width:max(3px, ${w(n)})` })));
+  }
+  rows($("#capacity"), [
+    ["Free disk", known ? `${bytes(s.disk_free)} of ${bytes(s.disk_total)}` : "Unknown"],
+    ["Strongbox data", bytes(onDisk + spares + s.db_bytes), `database ${bytes(s.db_bytes)}`],
+    ["Each account", bytes(s.vault_bytes), `${s.drives_per_vault} × ${bytes(s.drive_bytes)}`],
+    ["Spare vaults", s.spares_target === 0 ? "Off" : `${s.spares_ready} of ${s.spares_target} ready`, s.spares_filling ? "filling one" : ""],
+  ]);
+
+  // Accounts
+  rows($("#usage"), [
+    ["Accounts", s.accounts.toLocaleString()],
+    ["Security keys", s.member_keys.toLocaleString()],
+    ["Signed in now", s.active_sessions.toLocaleString()],
+  ]);
+
+  // Configuration
+  const reg = { open: "Open to anyone", invite: "Invite code required", closed: "Closed" }[c.registration];
+  // The LRM marks keep the path's own direction inside the right-to-left clipping box.
+  const dirCell = el("span", { style: "display:flex;align-items:center;min-width:0" },
+    el("span", { class: "path", title: c.data_dir, textContent: "\u200e" + c.data_dir + "\u200e" }), copyButton(c.data_dir, "Copy path"));
+  rows($("#config"), [
+    ["Registration", reg],
+    ["Listening on", el("span", { class: "mono", textContent: c.listen })],
+    ["Data directory", dirCell],
+    ["Session lifetime", duration(c.session_ttl_secs)],
+    ["Sign-in rate limit", `${c.prelogin_rate_per_minute} / min per IP`],
+    ["Client IP from proxy", c.trust_proxy ? "Yes" : "No"],
+    ["Logging", c.debug ? "Debug (identifying)" : "Private"],
+  ]);
+  $("#reg-aside").textContent = c.registration === "invite" ? "" : `Not checked: registration is ${c.registration}`;
+  $("#token-note").hidden = !c.invite_token_set;
+  for (const m of ["invite", "open"]) {
+    const b = $("#mode-" + m);
+    b.className = "btn" + (c.registration === m ? " primary" : "");
+    b.setAttribute("aria-pressed", String(c.registration === m));
+  }
+}
+
+function renderCodes() {
   const body = $("#codes tbody");
   body.replaceChildren();
+  $("#code-count").textContent = codes.length;
   $("#codes").hidden = !codes.length;
   $("#no-codes").hidden = codes.length > 0;
   for (const c of codes) {
-    const tr = document.createElement("tr");
-    const code = document.createElement("td"); code.className = "code"; code.textContent = c.code;
-    const type = document.createElement("td");
-    const tag = document.createElement("span");
-    tag.className = "tag" + (c.single_use ? " once" : "");
-    tag.textContent = c.single_use ? "Single use" : "Standard";
-    type.append(tag);
-    const when = document.createElement("td"); when.className = "muted";
-    when.textContent = new Date(c.created_at * 1000).toLocaleString();
-    const act = document.createElement("td"); act.className = "actions";
-    const copy = document.createElement("button"); copy.textContent = "Copy";
-    copy.onclick = async () => {
-      try { await navigator.clipboard.writeText(c.code); copy.textContent = "Copied"; }
-      catch { copy.textContent = "Select and copy"; }
-      setTimeout(() => (copy.textContent = "Copy"), 1500);
+    const del = el("button", { class: "btn danger-ghost sm", html: icon("trash") + "Delete" });
+    let armed = null;
+    del.onclick = () => {
+      if (!armed) {
+        del.className = "btn danger sm"; del.innerHTML = icon("trash") + "Confirm";
+        armed = setTimeout(() => { armed = null; del.className = "btn danger-ghost sm"; del.innerHTML = icon("trash") + "Delete"; }, 3000);
+        return;
+      }
+      clearTimeout(armed);
+      run(() => api("DELETE", "/admin/codes/" + c.id));
     };
-    const del = document.createElement("button"); del.className = "danger"; del.textContent = "Delete";
-    del.onclick = () => run(async () => {
-      if (!confirm(`Delete this ${c.single_use ? "single-use" : "standard"} code? It stops working immediately.`)) return;
-      await api("DELETE", "/admin/codes/" + c.id);
-    });
-    act.append(copy, del);
-    tr.append(code, type, when, act);
-    body.append(tr);
+    body.append(el("tr", {},
+      el("td", { class: "code" }, c.code, copyButton(c.code, "Copy code")),
+      el("td", {}, el("span", { class: "tag" + (c.single_use ? " once" : ""), textContent: c.single_use ? "Single use" : "Standard" })),
+      el("td", { class: "when", textContent: new Date(c.created_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) }),
+      el("td", { class: "actions" }, del),
+    ));
   }
 }
 
-async function refresh() { await Promise.all([loadStats(), loadCodes()]); }
-
-async function run(fn) {
-  $("#error").textContent = "";
-  try { await fn(); await refresh(); }
-  catch (e) { $("#error").textContent = e.message || String(e); }
+function render() {
+  if (!stats) return;
+  renderTiles(); renderPanels(); renderAlerts();
 }
 
-$("#new-standard").onclick = () => run(async () => {
-  const code = $("#custom").value.trim();
-  await api("POST", "/admin/codes", { single_use: false, code: code || null });
-  $("#custom").value = "";
-});
-$("#new-once").onclick = () => run(() => api("POST", "/admin/codes", { single_use: true }));
+async function refresh() {
+  try {
+    [stats, codes] = await Promise.all([api("GET", "/admin/stats"), api("GET", "/admin/codes")]);
+    fetchedAt = Date.now();
+    $("#live").className = "live";
+    // Rebuild the table only when codes changed, so a half-confirmed delete survives a refresh.
+    const json = JSON.stringify(codes);
+    if (json !== codesJson) { codesJson = json; renderCodes(); }
+    render();
+  } catch (e) {
+    $("#live").className = "live stale";
+    $("#meta").textContent = "Server not responding";
+    throw e;
+  }
+}
 
-run(() => Promise.resolve());
-setInterval(() => refresh().catch(() => {}), 15000);
+async function run(fn) {
+  const err = $("#error");
+  err.hidden = true;
+  $("#custom").removeAttribute("aria-invalid");
+  try { await fn(); await refresh(); }
+  catch (e) { err.textContent = e.message || String(e); err.hidden = false; }
+}
+
+for (const m of ["invite", "open"])
+  $("#mode-" + m).onclick = () => run(() => api("PUT", "/admin/registration", { mode: m }));
+$("#new-standard").onclick = () => run(async () => {
+  const input = $("#custom");
+  const code = input.value.trim();
+  try { await api("POST", "/admin/codes", { single_use: false, code: code || null }); }
+  catch (e) { input.setAttribute("aria-invalid", "true"); throw e; }
+  input.value = "";
+});
+$("#custom").onkeydown = (e) => { if (e.key === "Enter") $("#new-standard").click(); };
+$("#new-once").onclick = () => run(() => api("POST", "/admin/codes", { single_use: true }));
+$("#refresh").onclick = () => refresh().catch(() => {});
+let resize;
+window.onresize = () => { clearTimeout(resize); resize = setTimeout(render, 120); };
+matchMedia("(prefers-color-scheme: dark)").onchange = render;
+
+refresh().catch(() => {});
+setInterval(() => refresh().catch(() => {}), 5000);
 </script>
 </body>
 </html>

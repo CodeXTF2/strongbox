@@ -63,6 +63,13 @@ pub struct CreateVaultRequest {
     pub invite: Option<String>,
 }
 
+/// `POST /v2/invite/check`: whether sign-up would accept this invite code right now (nothing is
+/// spent), so the client can ask for it before the user touches their security key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckInviteRequest {
+    pub invite: Option<String>,
+}
+
 /// `GET /v2/lookup/{hex lookup id}`. Unknown ids get a stable decoy of the same size.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordResponse {

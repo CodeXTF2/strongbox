@@ -21,9 +21,7 @@ pub const BLOCK_SIZE: usize = 256 * 1024;
 pub const BLOCK_PAYLOAD: usize = BLOCK_SIZE - aead::NONCE_LEN - aead::TAG_LEN;
 /// Key entries per header (one per security key that can open the drive).
 pub const KEY_ENTRIES: usize = 8;
-/// Index of the recovery-code entry.
-pub const RECOVERY_ENTRY: usize = KEY_ENTRIES;
-const ENTRIES: usize = KEY_ENTRIES + 1;
+const ENTRIES: usize = KEY_ENTRIES;
 pub const ENTRY_LEN: usize = aead::NONCE_LEN + 32 + aead::TAG_LEN;
 /// Bytes at the start of a header holding its entries (the sealed body follows).
 pub const ENTRIES_LEN: usize = ENTRIES * ENTRY_LEN;
@@ -41,12 +39,8 @@ const L_DRIVE_SALT: &str = "strongbox/drive-salt/v1";
 const L_LOCATOR: &str = "strongbox/vault/locator/v1";
 const L_AUTH: &str = "strongbox/vault/auth/v1";
 const L_TRANSPORT: &str = "strongbox/vault/transport/v1";
-const L_REC_TRANSPORT: &str = "strongbox/vault/recovery-transport/v1";
 const L_VAULT_SEED: &str = "strongbox/vault-salt/seeded/v1";
-const L_REC_LOCATOR: &str = "strongbox/vault/recovery-locator/v1";
-const L_REC_AUTH: &str = "strongbox/vault/recovery-auth/v1";
 const L_ENTRY: &str = "strongbox/drive/entry/v1";
-const L_REC_ENTRY: &str = "strongbox/drive/recovery-entry/v1";
 const L_HEADER: &str = "strongbox/drive/header/v2";
 const L_META: &str = "strongbox/drive/meta/v1";
 const L_FILE: &str = "strongbox/drive/file/v1";
@@ -54,20 +48,23 @@ const L_CHALLENGE: &str = "strongbox/vault-auth-challenge/v1";
 
 /// PRF input for drive `slot` with `pin`. The PIN goes into the salt so that every guess
 /// needs the physical key (one touch per two guesses).
-pub fn drive_salt(slot: u32, pin: &str) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(kdf::info(
+///
+/// The salt is a fast hash of the PIN, so it is treated as secret as the PIN itself: the input
+/// holding the PIN and the result are zeroized on drop.
+pub fn drive_salt(slot: u32, pin: &str) -> zeroize::Zeroizing<[u8; 32]> {
+    let info = zeroize::Zeroizing::new(kdf::info(
         L_DRIVE_SALT,
         &[&slot.to_be_bytes(), pin.as_bytes()],
     ));
-    h.finalize().into()
+    zeroize::Zeroizing::new(Sha256::digest(&*info).into())
 }
 
 /// PRF input for the vault login of an account with a random per-account `seed` (stored in its
 /// encrypted record). It makes the same credential on two servers yield unrelated secrets, so a
 /// hostile server cannot obtain another server's login or transport keys.
-pub fn vault_salt(seed: &[u8; 32]) -> Vec<u8> {
-    Sha256::digest(kdf::info(L_VAULT_SEED, &[seed])).to_vec()
+pub fn vault_salt(seed: &[u8; 32]) -> zeroize::Zeroizing<Vec<u8>> {
+    let info = zeroize::Zeroizing::new(kdf::info(L_VAULT_SEED, &[seed]));
+    zeroize::Zeroizing::new(Sha256::digest(&*info).to_vec())
 }
 
 /// Check a drive PIN against the minimum length (digits or a passphrase).
@@ -82,7 +79,7 @@ pub fn check_drive_pin(pin: &str) -> Result<()> {
 
 // ---------------------------------------------------------------- login credentials
 
-/// What a vault member (security key or recovery code) uses to log in.
+/// What a vault member (a security key) uses to log in.
 pub struct MemberCreds {
     /// Sent at login; the server stores only its SHA-256.
     pub locator: [u8; 32],
@@ -95,14 +92,10 @@ pub struct MemberCreds {
 impl MemberCreds {
     /// From the hmac-secret output for [`vault_salt`].
     pub fn from_prf(prf_vault: &[u8; 32]) -> Self {
-        Self::derive(prf_vault, L_LOCATOR, L_AUTH, L_TRANSPORT)
-    }
-
-    fn derive(ikm: &[u8], locator: &str, auth: &str, transport: &str) -> Self {
         MemberCreds {
-            locator: *kdf::derive(ikm, None, locator, &[]).as_bytes(),
-            auth: SigningKey::from_bytes(kdf::derive(ikm, None, auth, &[]).as_bytes()),
-            transport: kdf::derive(ikm, None, transport, &[]),
+            locator: *kdf::derive(prf_vault, None, L_LOCATOR, &[]).as_bytes(),
+            auth: SigningKey::from_bytes(kdf::derive(prf_vault, None, L_AUTH, &[]).as_bytes()),
+            transport: kdf::derive(prf_vault, None, L_TRANSPORT, &[]),
         }
     }
 
@@ -167,7 +160,7 @@ pub struct UsernameKeys {
     record_key: Key,
     /// The account's random PRF-salt seed, set by [`new_seed`](Self::new_seed) at sign-up or
     /// read back by [`open_record`](Self::open_record); `None` until then.
-    seed: std::sync::Mutex<Option<[u8; 32]>>,
+    seed: std::sync::Mutex<Option<zeroize::Zeroizing<[u8; 32]>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -175,7 +168,6 @@ pub struct VaultMemberLabel {
     pub id: String,
     pub label: String,
     pub kind: String,
-    pub slot: Option<u32>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -203,22 +195,23 @@ impl UsernameKeys {
 
     /// Choose a fresh random seed for a new account.
     pub fn new_seed(&self) {
-        let mut seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut seed);
+        let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+        rand::thread_rng().fill_bytes(seed.as_mut());
         *self.seed.lock().unwrap() = Some(seed);
     }
 
-    fn seed(&self) -> Result<[u8; 32]> {
+    fn seed(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
         self.seed
             .lock()
             .unwrap()
+            .clone()
             .ok_or(Error::Malformed("account seed not loaded"))
     }
 
     /// The PRF input for this account's vault login. Fails until the seed is known (sign-up or
     /// an opened record).
-    pub fn vault_salt(&self) -> Result<Vec<u8>> {
-        Ok(vault_salt(&self.seed()?))
+    pub fn vault_salt(&self) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        Ok(vault_salt(&*self.seed()?))
     }
 
     /// Encrypt the credential ids of this username's security keys.
@@ -267,7 +260,7 @@ impl UsernameKeys {
         .ok()?;
         let len = u32::from_be_bytes(plain.get(..4)?.try_into().ok()?) as usize;
         let record: CredentialRecord = ciborium::from_reader(plain.get(4..4 + len)?).ok()?;
-        let seed = <[u8; 32]>::try_from(record.seed.as_slice()).ok()?;
+        let seed = zeroize::Zeroizing::new(<[u8; 32]>::try_from(record.seed.as_slice()).ok()?);
         *self.seed.lock().unwrap() = Some(seed);
         Some((
             record
@@ -277,52 +270,6 @@ impl UsernameKeys {
                 .collect(),
             record.members,
         ))
-    }
-}
-
-// ---------------------------------------------------------------- recovery codes
-
-/// A recovery code: one 256-bit secret. Its vault login credentials and per-drive entry keys
-/// are derived from the whole secret under separate labels, so each keeps the full 256-bit
-/// strength against offline guessing, including Grover-style quantum search.
-pub struct RecoveryCode {
-    secret: zeroize::Zeroizing<[u8; 32]>,
-}
-
-impl RecoveryCode {
-    pub fn generate() -> Self {
-        RecoveryCode {
-            secret: crate::recovery::generate(),
-        }
-    }
-
-    pub fn encode(&self) -> String {
-        crate::recovery::encode(&self.secret)
-    }
-
-    pub fn decode(code: &str) -> Result<Self> {
-        Ok(RecoveryCode {
-            secret: crate::recovery::decode(code)?,
-        })
-    }
-
-    /// Credentials to log in to the vault as this recovery code's member.
-    pub fn member_creds(&self) -> MemberCreds {
-        MemberCreds::derive(
-            self.secret.as_ref(),
-            L_REC_LOCATOR,
-            L_REC_AUTH,
-            L_REC_TRANSPORT,
-        )
-    }
-
-    pub fn entry_key(&self, slot: u32) -> Key {
-        kdf::derive(
-            self.secret.as_ref(),
-            None,
-            L_REC_ENTRY,
-            &[&slot.to_be_bytes()],
-        )
     }
 }
 
@@ -349,7 +296,7 @@ pub fn random_block() -> Vec<u8> {
 
 fn seal_block(key: &Key, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     assert!(plaintext.len() <= BLOCK_PAYLOAD);
-    let mut padded = plaintext.to_vec();
+    let mut padded = zeroize::Zeroizing::new(plaintext.to_vec());
     padded.resize(BLOCK_PAYLOAD, 0);
     let out = aead::seal(key, aad, &padded);
     debug_assert_eq!(out.len(), BLOCK_SIZE);
@@ -456,30 +403,22 @@ pub struct OpenedHeader {
     pub body: HeaderBody,
 }
 
-/// Try to open one header copy with any of `keys` (each tried against its entries: key
-/// entries for security keys, the recovery entry for a recovery code). `None` means nothing
+/// Try to open one header copy with `key` against each of its entries. `None` means nothing
 /// opened it, which is deliberately the same for a wrong PIN and an unused slot.
-pub fn open_header(
-    slot: u32,
-    copy: u8,
-    header: &[u8],
-    keys: &[(Key, EntryKind)],
-) -> Option<OpenedHeader> {
+pub fn open_header(slot: u32, copy: u8, header: &[u8], key: &Key) -> Option<OpenedHeader> {
     if header.len() != HEADER_LEN {
         return None;
     }
     let entries = header_entries(header);
-    for (key, kind) in keys {
-        for (i, drive_key) in open_entries(slot, &entries, key, *kind) {
-            let Some(body) = open_header_body(slot, copy, header, &drive_key) else {
-                continue;
-            };
-            return Some(OpenedHeader {
-                drive_key,
-                entry: i,
-                body,
-            });
-        }
+    for (i, drive_key) in open_entries(slot, &entries, key) {
+        let Some(body) = open_header_body(slot, copy, header, &drive_key) else {
+            continue;
+        };
+        return Some(OpenedHeader {
+            drive_key,
+            entry: i,
+            body,
+        });
     }
     None
 }
@@ -489,31 +428,14 @@ fn open_entries<'a>(
     slot: u32,
     entries: &'a [Entry; ENTRIES],
     key: &'a Key,
-    kind: EntryKind,
 ) -> impl Iterator<Item = (usize, Key)> + 'a {
-    let range = match kind {
-        EntryKind::Key => 0..KEY_ENTRIES,
-        EntryKind::Recovery => RECOVERY_ENTRY..RECOVERY_ENTRY + 1,
-    };
-    range.filter_map(move |i| {
+    (0..KEY_ENTRIES).filter_map(move |i| {
         let dk = aead::open(key, &entry_aad(slot, i), &entries[i]).ok()?;
         Some((
             i,
             Key::from_bytes(<[u8; 32]>::try_from(dk.as_slice()).ok()?),
         ))
     })
-}
-
-/// Whether any of `keys` opens an entry in `prefix`, the first [`ENTRIES_LEN`] bytes of a
-/// header copy. A cheap pre-check: [`open_header`] can only succeed on a copy that passes it,
-/// so a wrong PIN or an unused slot can be answered without fetching whole header blocks.
-pub fn entries_open(slot: u32, prefix: &[u8], keys: &[(Key, EntryKind)]) -> bool {
-    if prefix.len() != ENTRIES_LEN {
-        return false;
-    }
-    let entries = header_entries(prefix);
-    keys.iter()
-        .any(|(key, kind)| open_entries(slot, &entries, key, *kind).next().is_some())
 }
 
 /// Decrypt a header copy's body with a known drive key (`None` if it does not authenticate,
@@ -530,12 +452,6 @@ pub fn open_header_body(slot: u32, copy: u8, header: &[u8], drive_key: &Key) -> 
     .ok()?;
     let len = u32::from_be_bytes(plain[..4].try_into().unwrap()) as usize;
     ciborium::from_reader(plain.get(4..4 + len)?).ok()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryKind {
-    Key,
-    Recovery,
 }
 
 // ---------------------------------------------------------------- metadata
@@ -580,9 +496,10 @@ fn meta_aad(slot: u32, block: u32) -> Vec<u8> {
     aead::aad(L_META, &[&slot.to_be_bytes(), &block.to_be_bytes()])
 }
 
-pub fn encode_meta(root: &VDir) -> Result<Vec<u8>> {
-    let mut cbor = Vec::new();
-    ciborium::into_writer(root, &mut cbor).map_err(|e| Error::Encoding(e.to_string()))?;
+/// The encoded tree holds every file name and file key, so it is zeroized on drop.
+pub fn encode_meta(root: &VDir) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    let mut cbor = zeroize::Zeroizing::new(Vec::new());
+    ciborium::into_writer(root, &mut *cbor).map_err(|e| Error::Encoding(e.to_string()))?;
     Ok(cbor)
 }
 
@@ -616,9 +533,10 @@ pub fn open_meta(
         return Err(Error::Malformed("metadata block count"));
     }
     let key = meta_key(drive_key);
-    let mut cbor = Vec::with_capacity(sealed.len() * BLOCK_PAYLOAD);
+    let mut cbor = zeroize::Zeroizing::new(Vec::with_capacity(sealed.len() * BLOCK_PAYLOAD));
     for (b, data) in body.meta_blocks.iter().zip(sealed) {
-        cbor.extend(open_block(&key, &meta_aad(slot, *b), data)?);
+        let part = zeroize::Zeroizing::new(open_block(&key, &meta_aad(slot, *b), data)?);
+        cbor.extend_from_slice(&part);
     }
     cbor.truncate(body.meta_len as usize);
     ciborium::from_reader(cbor.as_slice()).map_err(|e| Error::Encoding(e.to_string()))
@@ -771,93 +689,17 @@ mod tests {
         let block = seal_header(slot, 0, &drive_key, &entries, &body).unwrap();
         assert_eq!(block.len(), HEADER_LEN);
 
-        let opened = open_header(slot, 0, &block, &[(good.clone(), EntryKind::Key)]).unwrap();
+        let opened = open_header(slot, 0, &block, &good).unwrap();
         assert_eq!((opened.entry, &opened.body), (2, &body));
         assert_eq!(opened.drive_key, drive_key);
-        // The entry pre-check agrees with open_header for keys, slots and entry kinds.
-        let prefix = &block[..ENTRIES_LEN];
-        assert!(entries_open(
-            slot,
-            prefix,
-            &[(good.clone(), EntryKind::Key)]
-        ));
-        assert!(!entries_open(
-            slot,
-            prefix,
-            &[(wrong.clone(), EntryKind::Key)]
-        ));
-        assert!(!entries_open(
-            slot + 1,
-            prefix,
-            &[(good.clone(), EntryKind::Key)]
-        ));
-        assert!(!entries_open(
-            slot,
-            prefix,
-            &[(good.clone(), EntryKind::Recovery)]
-        ));
-        assert!(!entries_open(
-            slot,
-            &random_block()[..ENTRIES_LEN],
-            &[(good.clone(), EntryKind::Key)]
-        ));
-        assert!(!entries_open(
-            slot,
-            &prefix[1..],
-            &[(good.clone(), EntryKind::Key)]
-        ));
         // Wrong PIN, wrong slot, wrong copy and pure filler all fail the same way.
-        assert!(open_header(slot, 0, &block, &[(wrong, EntryKind::Key)]).is_none());
-        assert!(open_header(slot + 1, 0, &block, &[(good.clone(), EntryKind::Key)]).is_none());
-        assert!(open_header(slot, 1, &block, &[(good.clone(), EntryKind::Key)]).is_none());
-        assert!(
-            open_header(slot, 0, &random_header(), &[(good.clone(), EntryKind::Key)]).is_none()
-        );
-        assert!(open_header(slot, 0, &block[1..], &[(good.clone(), EntryKind::Key)]).is_none());
-        // A key entry is not accepted as the recovery entry.
-        assert!(open_header(slot, 0, &block, &[(good, EntryKind::Recovery)]).is_none());
+        assert!(open_header(slot, 0, &block, &wrong).is_none());
+        assert!(open_header(slot + 1, 0, &block, &good).is_none());
+        assert!(open_header(slot, 1, &block, &good).is_none());
+        assert!(open_header(slot, 0, &random_header(), &good).is_none());
+        assert!(open_header(slot, 0, &block[1..], &good).is_none());
         // Entries carry over byte for byte.
         assert_eq!(header_entries(&block), entries);
-    }
-
-    #[test]
-    fn recovery_entry() {
-        let slot = 3;
-        let code = RecoveryCode::generate();
-        let back = RecoveryCode::decode(&code.encode()).unwrap();
-        assert_eq!(back.encode(), code.encode());
-        assert_eq!(back.member_creds().locator, code.member_creds().locator);
-        // Login and drive keys are independent derivations of the same secret.
-        assert_ne!(
-            &code.member_creds().locator[..],
-            code.entry_key(slot).as_bytes()
-        );
-        let drive_key = Key::random();
-        let mut entries: [Entry; ENTRIES] = std::array::from_fn(|_| random_entry());
-        entries[RECOVERY_ENTRY] =
-            wrap_entry(slot, RECOVERY_ENTRY, &code.entry_key(slot), &drive_key);
-        let block = seal_header(slot, 1, &drive_key, &entries, &HeaderBody::default()).unwrap();
-        let o = open_header(
-            slot,
-            1,
-            &block,
-            &[(back.entry_key(slot), EntryKind::Recovery)],
-        )
-        .unwrap();
-        assert_eq!(o.entry, RECOVERY_ENTRY);
-        let recovery = [(back.entry_key(slot), EntryKind::Recovery)];
-        assert!(entries_open(slot, &block[..ENTRIES_LEN], &recovery));
-        assert!(open_header(
-            slot,
-            1,
-            &block,
-            &[(back.entry_key(slot + 1), EntryKind::Recovery)]
-        )
-        .is_none());
-        assert_ne!(
-            code.member_creds().locator,
-            MemberCreds::from_prf(&prf(1)).locator
-        );
     }
 
     #[test]

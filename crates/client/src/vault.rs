@@ -9,15 +9,14 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use strongbox_core::names::validate_name;
 use strongbox_core::vault::{
     self as v, check_drive_pin, drive_salt, entry_key, header_entries, open_header,
-    open_header_body, Entry, EntryKind, HeaderBody, MemberCreds, RecoveryCode, UsernameKeys, VDir,
-    VFile, VNode, VaultGrant, VaultMemberLabel, BLOCK_PAYLOAD, ENTRIES_LEN, HEADER_BLOCKS,
-    HEADER_LEN, KEY_ENTRIES, RECOVERY_ENTRY,
+    open_header_body, Entry, HeaderBody, MemberCreds, UsernameKeys, VDir, VFile, VNode, VaultGrant,
+    VaultMemberLabel, BLOCK_PAYLOAD, HEADER_BLOCKS, HEADER_LEN, KEY_ENTRIES,
 };
 use strongbox_core::Key;
 use strongbox_fido::{Authenticator, VAULT_USER_NAME};
@@ -30,9 +29,42 @@ use crate::api::Api;
 use crate::transfer::{ListEntry, OnConflict, TransferOptions};
 use crate::{Error, Result};
 
-/// WebAuthn relying party id for every credential Strongbox creates. `.invalid` is reserved
-/// (RFC 6761) and can never be registered, so nobody can take over the domain.
+/// Default WebAuthn relying party id for every credential Strongbox creates. `.invalid` is
+/// reserved (RFC 6761) and can never be registered, so nobody can take over the domain.
 pub const DEFAULT_RP_ID: &str = "strongbox.invalid";
+
+static RP_ID: RwLock<Option<String>> = RwLock::new(None);
+
+/// Choose the relying party id for this process. Credentials and PRF secrets are bound to it,
+/// so it must be the same value every time the same key is used.
+pub fn set_rp_id(rp_id: &str) -> Result<()> {
+    let ok = !rp_id.is_empty()
+        && rp_id.len() <= 253
+        && rp_id.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+    if !ok {
+        return Err(Error::Invalid(
+            "relying party id must be a lowercase domain name".into(),
+        ));
+    }
+    *RP_ID.write().unwrap() = Some(rp_id.to_string());
+    Ok(())
+}
+
+/// The relying party id in use.
+pub fn rp_id() -> String {
+    RP_ID
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| DEFAULT_RP_ID.to_string())
+}
 
 struct Inner {
     api: Api,
@@ -49,11 +81,10 @@ pub struct VaultClient {
     inner: Arc<Inner>,
 }
 
-/// Keys that may open one slot: a security key's entry key, or a recovery code's.
+/// The key that may open one slot: a security key's entry key for (slot, PIN).
 pub struct SlotKey {
     slot: u32,
     key: Key,
-    kind: EntryKind,
     member_id: String,
 }
 
@@ -200,7 +231,7 @@ pub async fn connect_account(
     let (credentials, members) = credentials(&api, &keys).await?;
     let allow = credentials.clone();
     let vsalt = keys.vault_salt()?;
-    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, None)).await?;
+    let pair = blocking(move || authn.prf2(&rp_id(), &allow, &vsalt, None)).await?;
     login(
         api,
         &server_id,
@@ -213,29 +244,6 @@ pub async fn connect_account(
     .await
 }
 
-/// Authenticate to an account with an account-scoped recovery code, without opening a drive.
-pub async fn connect_account_with_recovery(
-    server_url: &str,
-    username: &str,
-    code: &str,
-) -> Result<VaultClient> {
-    let code = RecoveryCode::decode(code)?;
-    let (api, server_id, layout) = server(server_url).await?;
-    let keys = username_keys(username, &server_id).await?;
-    let (credentials, members) = credentials(&api, &keys).await?;
-    let creds = code.member_creds();
-    let id = member_id(&creds.locator);
-    if !members
-        .iter()
-        .any(|member| member.id == id && member.kind == "recovery_code" && member.slot.is_none())
-    {
-        return Err(Error::Invalid(
-            "this is not an account recovery code".into(),
-        ));
-    }
-    login(api, &server_id, layout, keys, credentials, members, &creds).await
-}
-
 /// Enroll a credential and get its vault-login PRF output: one touch when the key can evaluate
 /// the PRF while enrolling, otherwise two (enroll, then assert).
 async fn enroll_with_vault_secret(
@@ -245,13 +253,13 @@ async fn enroll_with_vault_secret(
 ) -> Result<(Vec<u8>, zeroize::Zeroizing<[u8; 32]>)> {
     let (a, exclude, salt) = (authn.clone(), exclude.to_vec(), vault_salt.to_vec());
     let enrolled =
-        blocking(move || a.enroll_prf(DEFAULT_RP_ID, VAULT_USER_NAME, &exclude, &salt)).await?;
+        blocking(move || a.enroll_prf(&rp_id(), VAULT_USER_NAME, &exclude, &salt)).await?;
     if let Some(first) = enrolled.first {
         return Ok((enrolled.credential_id, first));
     }
     let allow = vec![enrolled.credential_id.clone()];
     let salt = vault_salt.to_vec();
-    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &salt, None)).await?;
+    let pair = blocking(move || authn.prf2(&rp_id(), &allow, &salt, None)).await?;
     Ok((enrolled.credential_id, pair.first))
 }
 
@@ -275,6 +283,8 @@ pub async fn create_vault_named(
     label: &str,
 ) -> Result<VaultClient> {
     let (api, server_id, layout) = server(server_url).await?;
+    // Reject a bad invite before the user is asked to touch their key.
+    api.check_invite(invite.clone()).await?;
     let keys = username_keys(username, &server_id).await?;
     let retry_authn = authn.clone();
     // A fresh random seed in the account record makes this account's login secrets unrelated
@@ -287,7 +297,6 @@ pub async fn create_vault_named(
         id: member_id(&creds.locator),
         label: label.into(),
         kind: "security_key".into(),
-        slot: None,
     }];
     api.create_vault(&CreateVaultRequest {
         lookup: keys.lookup.to_vec(),
@@ -329,7 +338,7 @@ pub async fn connect(
     let salt = drive_salt(slot, pin);
     let allow = credentials.clone();
     let vsalt = keys.vault_salt()?;
-    let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
+    let pair = blocking(move || authn.prf2(&rp_id(), &allow, &vsalt, Some(&salt[..]))).await?;
     let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
     let member = MemberCreds::from_prf(&pair.first);
     let member_id = member_id(&member.locator);
@@ -339,55 +348,8 @@ pub async fn connect(
         SlotKey {
             slot,
             key: entry_key(&second),
-            kind: EntryKind::Key,
             member_id,
         },
-    ))
-}
-
-/// Log in with a drive recovery code and find the drive it opens.
-pub async fn connect_with_recovery(
-    server_url: &str,
-    username: &str,
-    code: &str,
-) -> Result<(VaultClient, SlotKey)> {
-    let code = RecoveryCode::decode(code)?;
-    let (api, server_id, layout) = server(server_url).await?;
-    let keys = username_keys(username, &server_id).await?;
-    let (credentials, members) = credentials(&api, &keys).await?;
-    let client = login(
-        api,
-        &server_id,
-        layout,
-        keys,
-        credentials,
-        members,
-        &code.member_creds(),
-    )
-    .await?;
-    // One request for every slot's entry table, then open only the slots whose recovery entry
-    // this code unlocks, instead of fetching the headers of every slot in turn.
-    let per_slot = HEADER_BLOCKS as usize * ENTRIES_LEN;
-    let all = client.api().read_all_entries(layout.slots).await?;
-    let candidates = (0..layout.slots).filter(|&slot| {
-        let keys = [(code.entry_key(slot), EntryKind::Recovery)];
-        all[slot as usize * per_slot..(slot as usize + 1) * per_slot]
-            .chunks(ENTRIES_LEN)
-            .any(|p| v::entries_open(slot, p, &keys))
-    });
-    for slot in candidates {
-        let k = SlotKey {
-            slot,
-            key: code.entry_key(slot),
-            kind: EntryKind::Recovery,
-            member_id: member_id(&code.member_creds().locator),
-        };
-        if client.open(&k).await?.is_some() {
-            return Ok((client, k));
-        }
-    }
-    Err(Error::Invalid(
-        "this recovery code does not open any drive".into(),
     ))
 }
 
@@ -412,13 +374,12 @@ impl VaultClient {
         let salt = drive_salt(slot, pin);
         let allow = self.inner.credentials.lock().unwrap().clone();
         let vsalt = self.inner.username.vault_salt()?;
-        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
+        let pair = blocking(move || authn.prf2(&rp_id(), &allow, &vsalt, Some(&salt[..]))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let member = MemberCreds::from_prf(&pair.first);
         Ok(SlotKey {
             slot,
             key: entry_key(&second),
-            kind: EntryKind::Key,
             member_id: member_id(&member.locator),
         })
     }
@@ -427,11 +388,10 @@ impl VaultClient {
     /// deliberately the same answer for a wrong PIN and a slot that was never used.
     pub async fn open(&self, k: &SlotKey) -> Result<Option<VaultDrive>> {
         let headers = self.api().read_headers(k.slot).await?;
-        let keys = [(k.key.clone(), k.kind)];
         let best = headers
             .chunks(HEADER_LEN)
             .zip(0u8..)
-            .filter_map(|(header, c)| open_header(k.slot, c, header, &keys).map(|h| (c, h)))
+            .filter_map(|(header, c)| open_header(k.slot, c, header, &k.key).map(|h| (c, h)))
             .max_by_key(|(_, h)| h.body.generation);
         let Some((copy, opened)) = best else {
             return Ok(None);
@@ -456,13 +416,8 @@ impl VaultClient {
     /// Create a new, empty drive in the slot, destroying whatever was there (which nobody,
     /// including this client, can know). Only a security-key slot key can create drives.
     pub async fn create(&self, k: &SlotKey) -> Result<VaultDrive> {
-        if k.kind != EntryKind::Key {
-            return Err(Error::Invalid(
-                "a recovery code cannot create drives".into(),
-            ));
-        }
         let drive_key = Key::random();
-        let mut entries: [Entry; KEY_ENTRIES + 1] = std::array::from_fn(|_| v::random_entry());
+        let mut entries: [Entry; KEY_ENTRIES] = std::array::from_fn(|_| v::random_entry());
         entries[0] = v::wrap_entry(k.slot, 0, &k.key, &drive_key);
         let mut drive = VaultDrive {
             client: self.clone(),
@@ -495,7 +450,7 @@ impl VaultClient {
         Ok(drive)
     }
 
-    /// Security keys and recovery codes that can log in to this vault.
+    /// Security keys that can log in to this vault.
     pub async fn members(&self) -> Result<(Vec<MemberInfo>, String)> {
         let r = self.api().vault_members().await?;
         Ok((r.members, r.current))
@@ -507,7 +462,7 @@ impl VaultClient {
             .iter()
             .find(|member| member.id == id)
             .cloned()
-            .ok_or_else(|| Error::Invalid("account key or recovery code not found".into()))?;
+            .ok_or_else(|| Error::Invalid("account key not found".into()))?;
         members.retain(|member| member.id != id);
         let mut credentials = self.inner.credentials.lock().unwrap().clone();
         if removed.kind == "security_key" {
@@ -541,14 +496,14 @@ impl VaultClient {
         self.inner.members.lock().unwrap().clone()
     }
 
-    /// Rename a security key or recovery code. Labels live only in the encrypted record.
+    /// Rename a security key. Labels live only in the encrypted record.
     pub async fn rename_member(&self, id: &str, label: &str) -> Result<()> {
         let label = self.clean_label(label, &[id.to_string()])?;
         let mut members = self.inner.members.lock().unwrap().clone();
         members
             .iter_mut()
             .find(|member| member.id == id)
-            .ok_or_else(|| Error::Invalid("account key or recovery code not found".into()))?
+            .ok_or_else(|| Error::Invalid("account key not found".into()))?
             .label = label;
         let credentials = self.inner.credentials.lock().unwrap().clone();
         let record = self.inner.username.seal_record(&credentials, &members)?;
@@ -562,7 +517,7 @@ impl VaultClient {
         Ok(())
     }
 
-    /// Trim a key or recovery-code name and refuse empty, over-long or duplicate ones. Names
+    /// Trim a key name and refuse empty, over-long or duplicate ones. Names
     /// are compared ignoring case and surrounding spaces; `ignore` lists members being replaced.
     fn clean_label(&self, label: &str, ignore: &[String]) -> Result<String> {
         let label = label.trim();
@@ -571,7 +526,7 @@ impl VaultClient {
         }
         if self.label_taken(label, ignore) {
             return Err(Error::Invalid(format!(
-                "a key or recovery code is already named “{label}”; choose another name"
+                "a key is already named “{label}”; choose another name"
             )));
         }
         Ok(label.to_string())
@@ -587,7 +542,7 @@ impl VaultClient {
             .any(|m| !ignore.contains(&m.id) && m.label.trim().to_lowercase() == key)
     }
 
-    /// `base`, or `base` with the lowest free number after it ("Recovery code 2"), to prefill
+    /// `base`, or `base` with the lowest free number after it ("Backup key 2"), to prefill
     /// the name prompt. `ignore` lists members that are about to be replaced.
     pub fn suggest_label(&self, base: &str, ignore: &[String]) -> String {
         if !self.label_taken(base, ignore) {
@@ -638,7 +593,6 @@ impl VaultClient {
             id: member_id(&member.locator),
             label: label.clone(),
             kind: "security_key".into(),
-            slot: None,
         });
         let record = self.inner.username.seal_record(&credentials, &members)?;
         self.api()
@@ -650,31 +604,6 @@ impl VaultClient {
         *self.inner.credentials.lock().unwrap() = credentials;
         *self.inner.members.lock().unwrap() = members;
         Ok(())
-    }
-
-    /// Add an account recovery code. It authenticates the account but cannot open drives.
-    pub async fn new_account_recovery_code_named(&self, label: &str) -> Result<String> {
-        let label = self.clean_label(label, &[])?;
-        let code = RecoveryCode::generate();
-        let member = code.member_creds();
-        self.add_member(&member).await?;
-        let mut members = self.inner.members.lock().unwrap().clone();
-        members.push(VaultMemberLabel {
-            id: member_id(&member.locator),
-            label: label.clone(),
-            kind: "recovery_code".into(),
-            slot: None,
-        });
-        let credentials = self.inner.credentials.lock().unwrap().clone();
-        let record = self.inner.username.seal_record(&credentials, &members)?;
-        self.api()
-            .update_vault_record(&UpdateRecordRequest {
-                lookup: self.inner.username.lookup.to_vec(),
-                record,
-            })
-            .await?;
-        *self.inner.members.lock().unwrap() = members;
-        Ok(code.encode())
     }
 
     async fn add_member(&self, creds: &MemberCreds) -> Result<()> {
@@ -720,7 +649,7 @@ pub struct VaultDrive {
     slot: u32,
     /// `None` once wiped (lock / panic): every later operation fails.
     drive_key: Arc<std::sync::RwLock<Option<Key>>>,
-    entries: [Entry; KEY_ENTRIES + 1],
+    entries: [Entry; KEY_ENTRIES],
     body: HeaderBody,
     /// Header copy holding `body`.
     copy: u8,
@@ -946,7 +875,7 @@ impl VaultDrive {
         let salt = drive_salt(self.slot, pin);
         let allow = vec![credential];
         let vsalt = self.client.inner.username.vault_salt()?;
-        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
+        let pair = blocking(move || authn.prf2(&rp_id(), &allow, &vsalt, Some(&salt[..]))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let member = MemberCreds::from_prf(&pair.first);
         if member_id(&member.locator) != known_id {
@@ -965,7 +894,7 @@ impl VaultDrive {
 
     /// Change this drive's PIN for the security key that opened it (one touch). Other keys'
     /// entries were derived from the old PIN, so they are revoked and can be granted again
-    /// with the new one. Returns how many were revoked. Recovery codes are unaffected.
+    /// with the new one. Returns how many were revoked.
     pub async fn change_pin(
         &mut self,
         authn: Arc<dyn Authenticator>,
@@ -1000,7 +929,7 @@ impl VaultDrive {
         let salt = drive_salt(self.slot, new_pin);
         let allow = vec![credential];
         let vsalt = self.client.inner.username.vault_salt()?;
-        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
+        let pair = blocking(move || authn.prf2(&rp_id(), &allow, &vsalt, Some(&salt[..]))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         if member_id(&MemberCreds::from_prf(&pair.first).locator) != current {
             return Err(Error::Invalid(
@@ -1031,16 +960,6 @@ impl VaultDrive {
         Ok(revoked)
     }
 
-    /// Ids of this drive's recovery codes (a new one replaces them).
-    pub fn recovery_ids(&self) -> Vec<String> {
-        self.client
-            .member_labels()
-            .into_iter()
-            .filter(|m| m.kind == "recovery_code" && m.slot == Some(self.slot))
-            .map(|m| m.id)
-            .collect()
-    }
-
     /// Revoke one account key from this drive. The other account keys remain unaffected.
     pub async fn revoke_account_key(&mut self, member_id: &str) -> Result<()> {
         let grant = self
@@ -1060,23 +979,6 @@ impl VaultDrive {
         let tree = self.tree.clone();
         self.commit(tree.clone()).await?;
         // Rewrite both header copies so an older copy cannot retain the removed wrapper.
-        self.commit(tree).await
-    }
-
-    /// Revoke a recovery code from this drive and remove its account sign-in member.
-    pub async fn revoke_recovery_code(&mut self, member_id: &str) -> Result<()> {
-        let member = self
-            .client
-            .member_labels()
-            .into_iter()
-            .find(|m| m.id == member_id && m.kind == "recovery_code" && m.slot == Some(self.slot))
-            .ok_or_else(|| Error::Invalid("recovery code not found for this vault".into()))?;
-        self.client.remove_member(&member.id).await?;
-        self.entries[RECOVERY_ENTRY] = v::random_entry();
-        self.body.used_entries &= !(1u16 << RECOVERY_ENTRY);
-        self.body.grants.retain(|g| g.member_id != member_id);
-        let tree = self.tree.clone();
-        self.commit(tree.clone()).await?;
         self.commit(tree).await
     }
 
@@ -1647,10 +1549,10 @@ impl VaultDrive {
         // A new credential for this username on the new key (the exclude list makes the key
         // refuse if it is already one of this username's keys), then its PRF: two touches.
         let (a, ex) = (authn.clone(), existing.clone());
-        let cred = blocking(move || a.enroll(DEFAULT_RP_ID, VAULT_USER_NAME, &ex)).await?;
+        let cred = blocking(move || a.enroll(&rp_id(), VAULT_USER_NAME, &ex)).await?;
         let allow = vec![cred.clone()];
         let vsalt = inner.username.vault_salt()?;
-        let pair = blocking(move || authn.prf2(DEFAULT_RP_ID, &allow, &vsalt, Some(&salt))).await?;
+        let pair = blocking(move || authn.prf2(&rp_id(), &allow, &vsalt, Some(&salt[..]))).await?;
         let second = pair.second.ok_or(strongbox_fido::Error::PrfUnsupported)?;
         let ek = entry_key(&second);
         let member_creds = MemberCreds::from_prf(&pair.first);
@@ -1663,7 +1565,6 @@ impl VaultDrive {
             id: added_member_id.clone(),
             label: label.clone(),
             kind: "security_key".into(),
-            slot: None,
         });
         let record = inner.username.seal_record(&credentials, &members)?;
         inner
@@ -1685,68 +1586,6 @@ impl VaultDrive {
         self.commit(tree).await
     }
 
-    /// Create (or replace) this drive's recovery code. Show it once; it opens only this drive.
-    pub async fn new_recovery_code(&mut self) -> Result<String> {
-        self.new_recovery_code_named("Recovery code").await
-    }
-
-    pub async fn new_recovery_code_named(&mut self, label: &str) -> Result<String> {
-        let old_ids = self.recovery_ids();
-        let label = self.client.clean_label(label, &old_ids)?;
-        let code = RecoveryCode::generate();
-        let creds = code.member_creds();
-        let old_ids: Vec<String> = self
-            .client
-            .inner
-            .members
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| m.kind == "recovery_code" && m.slot == Some(self.slot))
-            .map(|m| m.id.clone())
-            .collect();
-        for id in old_ids {
-            self.client.remove_member(&id).await?;
-        }
-        self.client.add_member(&creds).await?;
-        let mut members = self.client.inner.members.lock().unwrap().clone();
-        members.push(VaultMemberLabel {
-            id: member_id(&creds.locator),
-            label: label.clone(),
-            kind: "recovery_code".into(),
-            slot: Some(self.slot),
-        });
-        let ids = self.client.inner.credentials.lock().unwrap().clone();
-        let record = self.client.inner.username.seal_record(&ids, &members)?;
-        self.client
-            .inner
-            .api
-            .update_vault_record(&UpdateRecordRequest {
-                lookup: self.client.inner.username.lookup.to_vec(),
-                record,
-            })
-            .await?;
-        *self.client.inner.members.lock().unwrap() = members;
-        self.entries[RECOVERY_ENTRY] = v::wrap_entry(
-            self.slot,
-            RECOVERY_ENTRY,
-            &code.entry_key(self.slot),
-            &self.dk()?,
-        );
-        self.body.used_entries |= 1 << RECOVERY_ENTRY;
-        let recovery_id = member_id(&creds.locator);
-        self.body
-            .grants
-            .retain(|grant| grant.entry as usize != RECOVERY_ENTRY);
-        self.body.grants.push(VaultGrant {
-            entry: RECOVERY_ENTRY as u8,
-            member_id: recovery_id,
-        });
-        let tree = self.tree.clone();
-        self.commit(tree).await?;
-        Ok(code.encode())
-    }
-
     pub fn client(&self) -> &VaultClient {
         &self.client
     }
@@ -1755,6 +1594,23 @@ impl VaultDrive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rp_id_must_be_a_domain() {
+        // Only rejections here: a successful call would change process-wide state.
+        for bad in [
+            "",
+            "Strongbox.invalid",
+            "a b",
+            "a..b",
+            "-a.invalid",
+            "https://x.invalid",
+            "x/y",
+        ] {
+            assert!(set_rp_id(bad).is_err(), "{bad}");
+        }
+        assert_eq!(rp_id(), DEFAULT_RP_ID);
+    }
 
     #[test]
     fn block_runs() {

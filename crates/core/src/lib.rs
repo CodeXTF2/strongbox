@@ -9,7 +9,6 @@ pub mod error;
 pub mod ids;
 pub mod kdf;
 pub mod names;
-pub mod recovery;
 pub mod serde_b64;
 pub mod vault;
 

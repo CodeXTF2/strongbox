@@ -12,7 +12,7 @@ use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use strongbox_core::channel::{self as ch, Method, RequestHead};
-use strongbox_core::vault::{ENTRIES_LEN, HEADER_BLOCKS, HEADER_LEN};
+use strongbox_core::vault::{HEADER_BLOCKS, HEADER_LEN};
 use strongbox_core::Key;
 use strongbox_proto::*;
 use zeroize::Zeroizing;
@@ -110,6 +110,20 @@ impl Api {
     pub async fn create_vault(&self, req: &CreateVaultRequest) -> Result<VaultLayout> {
         self.plain_json(self.http.post(self.url("/v2/vaults")).json(req))
             .await
+    }
+
+    /// Whether sign-up would accept `invite` (errors like sign-up does if not). Spends nothing.
+    pub async fn check_invite(&self, invite: Option<String>) -> Result<()> {
+        let req = CheckInviteRequest { invite };
+        Self::check(
+            self.http
+                .post(self.url("/v2/invite/check"))
+                .json(&req)
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn vault_record(&self, lookup: &[u8]) -> Result<Vec<u8>> {
@@ -330,15 +344,6 @@ impl Api {
             .await?;
         if out.len() != count as usize * block_size {
             return Err(Error::Invalid("server returned a short block read".into()));
-        }
-        Ok(out)
-    }
-
-    /// The entry tables of every slot (`ENTRIES_LEN` bytes per header copy, slots in order).
-    pub async fn read_all_entries(&self, slots: u32) -> Result<Vec<u8>> {
-        let out = self.sealed(Method::Get, "/v2/entries", None).await?;
-        if out.len() != slots as usize * HEADER_BLOCKS as usize * ENTRIES_LEN {
-            return Err(Error::Invalid("server returned a short entry read".into()));
         }
         Ok(out)
     }

@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 dev-soft-authenticator = ["strongbox-client/soft-authenticator"]
 
 [dependencies]
+zeroize.workspace = true
 strongbox-client.workspace = true
 strongbox-core.workspace = true
 strongbox-fido.workspace = true

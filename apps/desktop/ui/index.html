@@ -10,6 +10,7 @@
 <body>
   <!-- ============ Sign in / create account ============ -->
   <section id="view-auth" class="auth-view" hidden>
+    <button class="icon-btn auth-settings" id="btn-auth-settings" title="Settings" aria-label="Settings" data-icon="settings"></button>
     <div class="auth-panel">
       <div class="brand"><span class="logo" aria-hidden="true"></span><span class="wordmark" aria-label="Strongbox">Strong<b>box</b></span></div>
 
@@ -29,25 +30,14 @@
         <label class="field">Username
           <input name="username" type="password" required autocomplete="off" spellcheck="false" autocapitalize="off">
         </label>
-        <div class="stack" id="recovery-block" hidden>
-          <div class="segmented" id="code-kind" role="group" aria-label="Recovery code type">
-            <button type="button" data-kind="account" aria-pressed="true">Account code</button>
-            <button type="button" data-kind="vault" aria-pressed="false">Vault code</button>
-          </div>
-          <label class="field">Recovery code
-            <input name="code" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="XXXX-XXXX-…">
-            <span class="hint" id="code-hint"></span>
-          </label>
-        </div>
         <p class="form-error" hidden></p>
         <button class="btn primary lg" type="submit" data-icon="key" id="signin-submit">Sign in with security key</button>
-        <button class="btn link" type="button" id="btn-signin-mode">Use a recovery code instead</button>
       </form>
 
       <form id="setup-form" class="stack" autocomplete="off" novalidate hidden>
         <div>
           <h1>Create account</h1>
-          <p class="muted">Create your account and sign-in key. You'll get a recovery code to save, and can create or unlock vaults after signing in.</p>
+          <p class="muted">Create your account and sign-in key. There is no recovery: if you lose every key that opens a vault, its files are gone, so add a backup key. You can create or unlock vaults after signing in.</p>
         </div>
         <label class="field">Server
           <input name="server" type="url" required placeholder="https://drive.example.org" spellcheck="false">
@@ -207,6 +197,43 @@
     </div>
   </dialog>
 
+  <!-- Settings available before sign-in -->
+  <dialog id="app-settings" class="dialog">
+    <form id="app-settings-form" novalidate>
+      <div class="dialog-head">
+        <h2>Settings</h2>
+        <button class="icon-btn" type="button" id="app-settings-close" aria-label="Close" data-icon="x"></button>
+      </div>
+      <div class="settings-body">
+        <section>
+          <h3>Appearance</h3>
+          <label class="field inline">Theme
+            <select id="app-pref-theme">
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+        </section>
+        <section>
+          <h3>Relying party ID</h3>
+          <label class="field">
+            <input name="rp" required spellcheck="false" autocapitalize="off" autocomplete="off">
+          </label>
+          <div class="callout warn">
+            <span data-icon="alert"></span>
+            <span>Security key credentials and accounts are bound to the relying party ID. Anything created under a different ID will not work with the new one. Only change this if you know you need to.</span>
+          </div>
+          <p class="form-error" hidden></p>
+          <div class="btn-row">
+            <button class="btn ghost" type="button" id="app-settings-reset">Reset to default</button>
+            <button class="btn primary" type="submit">Save</button>
+          </div>
+        </section>
+      </div>
+    </form>
+  </dialog>
+
   <!-- Settings -->
   <dialog id="settings" class="dialog wide">
     <div class="dialog-head">
@@ -226,11 +253,10 @@
         <div class="section-head">
           <h3 id="signin-methods-title">Account sign-in</h3>
         </div>
-        <p class="muted small" id="signin-methods-note">These methods sign in to your account. A security key must also be granted access to each vault you want it to open. Account recovery codes do not unlock vaults.</p>
+        <p class="muted small" id="signin-methods-note">These methods sign in to your account. A security key must also be granted access to each vault you want it to open.</p>
         <ul class="key-list" id="keys-list"></ul>
         <div class="row gap">
           <button class="btn" id="btn-add-key" data-icon="plus">Add backup key</button>
-          <button class="btn ghost" id="btn-add-recovery" data-icon="file-key">New account recovery code</button>
         </div>
       </section>
       <section>
@@ -293,12 +319,6 @@
           <button class="btn" id="btn-add-vault-key" data-icon="plus">Add security key to this vault</button>
           <button class="btn ghost" id="btn-change-vault-pin" data-icon="key">Change vault passphrase</button>
         </div>
-      </section>
-      <section>
-        <h3>Recovery codes for this vault</h3>
-        <p class="muted small">Each code opens this vault only. It also signs in to your account, but does not open your other vaults.</p>
-        <ul class="key-list" id="vault-recovery-list"></ul>
-        <div><button class="btn ghost" id="btn-new-vault-recovery" data-icon="file-key">Create vault recovery code</button></div>
       </section>
     </div>
   </dialog>

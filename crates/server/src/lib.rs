@@ -10,6 +10,7 @@ pub mod channel_api;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod metrics;
 pub mod ratelimit;
 pub mod vault_api;
 pub mod vaultstore;
@@ -43,6 +44,9 @@ pub fn log_filter(debug: bool) -> String {
 
 pub struct AppState {
     pub config: Config,
+    /// Who may register. Starts from `--registration`; the admin page can switch it between
+    /// open and invite until the next restart (memory only, like sessions).
+    pub registration: std::sync::RwLock<strongbox_proto::RegistrationMode>,
     pub db: db::Db,
     pub server_id: String,
     /// Server-local secret for deterministic decoy records and blocks (see `api::decoy_bytes`).
@@ -51,7 +55,15 @@ pub struct AppState {
     pub vaults: vaultstore::VaultStore,
     pub vault_sessions: vault_api::VaultSessions,
     pub channels: channel_api::Channels,
+    /// Machine and process metrics for the admin page (memory only).
+    pub metrics: Arc<metrics::Metrics>,
     pub started: std::time::Instant,
+}
+
+impl AppState {
+    pub fn registration_mode(&self) -> strongbox_proto::RegistrationMode {
+        *self.registration.read().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 const BLOCK: u64 = strongbox_core::vault::BLOCK_SIZE as u64;
@@ -199,13 +211,17 @@ pub async fn build_all(config: Config) -> anyhow::Result<(Router, Router)> {
         vaults,
         vault_sessions: Default::default(),
         channels: Default::default(),
+        metrics: Default::default(),
         prelogin_limiter: ratelimit::RateLimiter::new(config.prelogin_rate_per_minute),
+        registration: std::sync::RwLock::new(config.registration),
         config,
         db,
         server_id,
         decoy_secret,
         started: std::time::Instant::now(),
     });
+
+    state.metrics.start(state.started);
 
     let janitor = state.clone();
     tokio::spawn(async move {

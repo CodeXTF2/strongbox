@@ -59,9 +59,7 @@ flowchart TD
     K -->|"touch 1: seeded vault salt → 256-bit PRF"| C["Sealed channel<br/>transport key from the PRF, AEAD + counters"]
     C -->|"challenge + Ed25519 login, all sealed"| V["Vault login"]
     V -->|"slot i + drive PIN"| K2["Security key touch 2: drive_salt(i, PIN)"]
-    V -->|"or a recovery code"| R["One read of every slot's entry table<br/>opens only the slot the code unlocks"]
     K2 -->|"read slot i's two 16 KiB header copies"| H["Fixed-size header<br/>entries + sealed body, rest of block filler"]
-    R --> H
     H -->|"an entry opens"| O["Drive opened<br/>batched commits wipe old metadata"]
     H -->|"wrong PIN or unused slot"| N["Same 'No drive found' error"]
     S["Vault: 100 slots, all random from creation<br/>(spares pre-filled the same way)"] -.-> H
@@ -131,7 +129,7 @@ flowchart TD
 
 | Path | What |
 |---|---|
-| `crates/core` | Client-side crypto: AEAD and key derivation, recovery codes, vault and drive formats |
+| `crates/core` | Client-side crypto: AEAD and key derivation, vault and drive formats |
 | `crates/proto` | HTTP API wire types (everything the server ever sees) |
 | `crates/fido` | PRF access: Windows WebAuthn API, CTAP2-HID (Linux/macOS), test-only software key |
 | `crates/client` | Client library and the `sbox` CLI |
@@ -157,7 +155,6 @@ cargo run -p strongbox-server -- --registration open
 # 2a. CLI: insert your security key (it must have a PIN set)
 cargo run -p strongbox-client --bin sbox -- create --server http://127.0.0.1:8080
 cargo run -p strongbox-client --bin sbox -- open --server http://127.0.0.1:8080 3
-cargo run -p strongbox-client --bin sbox -- recover --server http://127.0.0.1:8080
 
 # 2b. Desktop app
 cargo run -p strongbox-desktop
@@ -169,9 +166,16 @@ With `--registration invite`, an account needs an invite code: the shared `--inv
 code created on the admin page. The page has its own port (`--admin-listen`, default
 `http://127.0.0.1:4444/`); open it in a browser on the server machine. There you can create and delete **standard** codes (valid for any number of
 accounts until deleted; you may pick the text) and **single-use** codes (generated, and removed the
-moment they admit one account; a failed sign-up does not spend them), and see what the server can
-know: accounts, member keys, signed-in sessions, the vault layout and the full storage allocated
-(`accounts × drives × drive size`: the server cannot see how much of it holds data).
+moment they admit one account; a failed sign-up does not spend them). It also shows:
+
+- **Problems that need attention:** open registration, debug logging, low disk space, accounts
+  whose vault files are missing, and sustained high CPU.
+- **Live machine graphs:** CPU, memory, the server's I/O and network traffic. They cover the last
+  15 minutes and are kept in memory only.
+- **Capacity:** free disk, how many more accounts fit, Strongbox's own disk use and spare vaults.
+- **Accounts and configuration:** account, key and session counts, and the settings in effect.
+
+The server cannot see names, files or how much of a vault holds data, so none of that is shown.
 
 The page has no login of its own. It is a separate listener that must be a loopback address, and it
 is served only to a browser on the same machine: requests that come through a proxy (forwarded
@@ -196,9 +200,8 @@ Choose a username nobody could guess: it works like a password. Drive PINs need 
 characters; 10+ digits or a passphrase is recommended. Nothing about vaults is stored on the
 computer or the security key.
 
-The desktop client creates an account (and shows its recovery code), signs in with a key or an
-account or vault recovery code, creates a vault (and shows its recovery code), opens or resets
-a slot, adds another security key or recovery code, and deletes the account. It also has
+The desktop client creates an account, signs in with a key, creates a vault, opens or resets
+a slot, adds another security key, and deletes the account. It also has
 drag-and-drop upload of files and folders (onto the window or onto a specific folder),
 drag-to-move, multi-select, vault-wide search, in-app preview (images, PDF, audio, video, text)
 decrypted in memory, replace/keep-both on name clashes, cancellable parallel transfers, folder
@@ -212,7 +215,7 @@ Plain `http://` is accepted only for localhost. Real deployments go behind TLS (
 
 TLS is treated as optional protection. After sign-up, every API call is sealed in an
 end-to-end encrypted, authenticated channel keyed by a per-key `transport_key` derived from the
-security key's PRF output (or a recovery code), so a hostile HTTP/SOCKS proxy, or a forged TLS
+security key's PRF output , so a hostile HTTP/SOCKS proxy, or a forged TLS
 certificate, sees only ciphertext and cannot read, alter, replay or answer requests (it can
 drop or delay them). Nothing is
 pinned or stored on the computer. **Sign up on a network you trust:** sign-up (and the
@@ -246,8 +249,8 @@ cargo test --workspace
 
 `crates/client/tests/vault_e2e.rs` runs a real server and client with the software
 authenticator: two usernames on one key, decoy and hidden drives, wrong PIN vs unused slot,
-backup keys, recovery codes, account deletion, and the seized-server view (identical slot
-files, no plaintext, no usernames).
+backup keys, account deletion, and the seized-server view (one same-size file per vault,
+no plaintext, no usernames).
 `crates/client/tests/transport.rs` checks that the client never follows redirects and refuses
 plain HTTP to remote hosts. `crates/client/tests/hostile_proxy.rs` puts a recording, tampering
 proxy between client and server: nothing but ciphertext crosses it, and replayed, forged,
@@ -263,8 +266,10 @@ Early prototype. **Not audited.** Before relying on it:
 - Desktop vault flows have not yet been run against a physical security key.
 - See the hardening backlog in [docs/server-plan.md](docs/server-plan.md#6-security-hardening-backlog).
 
-Always enroll at least two security keys, or a key plus the recovery code. Losing every
-unlock method means losing the data. Nobody, including the server operator, can recover it.
+There are no recovery codes: any recovery secret would be something a record or the server could
+point at, and deniability comes first. Grant at least two security keys to every vault you care
+about. Losing every key that opens a vault, or its passphrase, means losing the data. Nobody,
+including the server operator, can recover it.
 
 ## References
 

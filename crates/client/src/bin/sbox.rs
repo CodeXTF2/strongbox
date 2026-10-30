@@ -16,6 +16,9 @@ use strongbox_fido::Interaction;
     about = "End-to-end encrypted cloud drive unlocked by a FIDO2 security key"
 )]
 struct Cli {
+    /// WebAuthn relying party id. Must match the one the key was enrolled with.
+    #[arg(long, global = true, env = "STRONGBOX_RP_ID", default_value = strongbox_client::vault::DEFAULT_RP_ID)]
+    rp_id: String,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -35,11 +38,6 @@ enum Cmd {
         server: String,
         /// Slot number (0-99 on a default server).
         slot: u32,
-    },
-    /// Open the drive a recovery code belongs to.
-    Recover {
-        #[arg(long)]
-        server: String,
     },
 }
 
@@ -74,8 +72,6 @@ enum VaultShellCmd {
     Usage,
     /// Let another security key open this drive (asks for this drive's PIN again).
     AddKey,
-    /// Create or replace this drive's recovery code.
-    RecoveryCode,
     Exit,
 }
 
@@ -96,14 +92,6 @@ impl Interaction for CliUi {
 
 fn authenticator() -> Arc<dyn strongbox_fido::Authenticator> {
     strongbox_fido::platform(Arc::new(CliUi)).into()
-}
-
-fn show_recovery(code: &str) {
-    eprintln!("\n================ RECOVERY CODE ================");
-    eprintln!("{code}");
-    eprintln!("===============================================");
-    eprintln!("Write this down and store it offline. It unlocks your drive without a");
-    eprintln!("security key. It will not be shown again.\n");
 }
 
 fn human(n: u64) -> String {
@@ -168,8 +156,8 @@ fn ask_vault_username(new: bool) -> anyhow::Result<String> {
     Ok(u)
 }
 
-fn ask_drive_pin(prompt: &str) -> anyhow::Result<String> {
-    Ok(rpassword::prompt_password(prompt)?)
+fn ask_drive_pin(prompt: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    Ok(zeroize::Zeroizing::new(rpassword::prompt_password(prompt)?))
 }
 
 fn confirm(question: &str) -> anyhow::Result<bool> {
@@ -217,27 +205,13 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
             vault_shell(drive).await?;
             v.logout().await?;
         }
-        Cmd::Recover { server } => {
-            let username = ask_vault_username(false)?;
-            let code = rpassword::prompt_password("Recovery code: ")?;
-            let (v, key) = vault::connect_with_recovery(&server, &username, &code).await?;
-            let drive = v.open(&key).await?.expect("recovery located this drive");
-            eprintln!(
-                "Opened slot {}. Add a security key with `add-key`.",
-                key.slot()
-            );
-            vault_shell(drive).await?;
-            v.logout().await?;
-        }
     }
     Ok(())
 }
 
 async fn vault_shell(mut drive: strongbox_client::vault::VaultDrive) -> anyhow::Result<()> {
     use strongbox_client::TransferOptions;
-    eprintln!(
-        "Drive open. Commands: ls, mkdir, put, get, rm, mv, usage, add-key, recovery-code, exit"
-    );
+    eprintln!("Drive open. Commands: ls, mkdir, put, get, rm, mv, usage, add-key, exit");
     let stdin = std::io::stdin();
     loop {
         eprint!("vault> ");
@@ -299,7 +273,6 @@ async fn vault_shell(mut drive: strongbox_client::vault::VaultDrive) -> anyhow::
                     drive.add_key(authenticator(), &pin).await?;
                     eprintln!("Done: that key now opens this drive (same slot and drive PIN).");
                 }
-                VaultShellCmd::RecoveryCode => show_recovery(&drive.new_recovery_code().await?),
                 VaultShellCmd::Exit => return Err(anyhow::anyhow!("exit")),
             }
             Ok(())
@@ -315,5 +288,7 @@ async fn vault_shell(mut drive: strongbox_client::vault::VaultDrive) -> anyhow::
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    run(Cli::parse().cmd).await
+    let cli = Cli::parse();
+    strongbox_client::vault::set_rp_id(&cli.rp_id)?;
+    run(cli.cmd).await
 }

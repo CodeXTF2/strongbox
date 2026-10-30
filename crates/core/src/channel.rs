@@ -3,7 +3,7 @@
 //! cannot forge, replay or reorder requests or responses.
 //!
 //! Both sides share one symmetric `transport_key` per vault member, derived from the member's
-//! security-key PRF output (or recovery code) and registered at sign-up. A session is set up
+//! security-key PRF output and registered at sign-up. A session is set up
 //! with a hello exchange (`confirm` proves the server holds the key); after that every request
 //! and response is an XChaCha20-Poly1305 message under a per-direction session key with a
 //! strictly increasing counter as nonce. Pure formats and crypto: no I/O.
