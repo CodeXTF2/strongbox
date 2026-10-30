@@ -1,7 +1,8 @@
 # Deniable drives (vault format v1)
 
-Status: implemented in the library, server, CLI and desktop UI; tested with the software
-authenticator only. **Not audited.**
+Status: implemented in the library, server, CLI and desktop UI; automated tests use the
+software authenticator, and the desktop app has been used with a physical security key
+(YubiKey C NFC, firmware 5.8). **Not audited.**
 
 This is Strongbox's only account and storage format: an account is a secret username, its
 security keys, and any number of fixed-size drives.

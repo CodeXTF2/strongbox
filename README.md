@@ -263,7 +263,6 @@ Early prototype. **Not audited.** Before relying on it:
 - The desktop app has been tested on a YubiKey C NFC (firmware 5.8). A raw CTAP probe also confirmed touch enforcement
   and credProtect on a YubiKey 5, firmware 5.8. Cross-platform PRF equality still needs
   confirming on hardware.
-- Desktop vault flows have not yet been run against a physical security key.
 - See the hardening backlog in [docs/server-plan.md](docs/server-plan.md#3-hardening-backlog).
 
 There are no recovery codes: any recovery secret would be something a record or the server could
