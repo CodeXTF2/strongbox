@@ -29,7 +29,7 @@ Likewise for usernames, under two threat models:
 - **Key and PIN only, no server access:** cannot match the key to any account. The key lists
   nothing (non-discoverable credentials), and there are no credential ids to test.
 
-**Explicitly out of scope** (stated so nobody relies on them):
+**Out of scope:**
 
 | Not protected | Why |
 |---|---|
@@ -37,14 +37,14 @@ Likewise for usernames, under two threat models:
 | A malicious server from the start | It can log which slots and blocks each session reads and writes, and keep the filler seed. |
 | Network observation | IP address, timing and message sizes link sessions; use Tor if that matters. Content is protected from a hostile network by the sealed channel (§8.1), but see its limits. |
 | Plaintext the user exports | Downloaded files, OS caches, thumbnails, swap. |
-| Coercion game theory | Deniability means the adversary cannot *prove* more drives exist. An adversary who knows the software supports hidden drives may keep coercing anyway. Users must understand this. |
+| Continued coercion | Deniability means the adversary cannot *prove* more drives exist. An adversary who knows the software supports hidden drives may keep coercing anyway. |
 | Data destruction | An adversary with the key and PIN can "reset" every slot, wiping hidden drives, without learning anything. |
 | Vault-level access time | A vault is one file, so its `ctime` (which cannot be reset) shows when the vault was last read or written, though not which slot. |
 | Filesystems that keep old data | On copy-on-write filesystems (btrfs, ZFS, snapshots) or SSDs that remap blocks, overwritten headers and "wiped" metadata can survive in a disk image. This is the multi-snapshot limit again. Run the server on a filesystem that overwrites in place. |
 | Losing every key | There are no recovery codes (§5). Losing every key that opens a drive, or its passphrase, loses the drive. |
 
-**Honest summary claim:** *deniable against a single seizure of an honest server plus the
-security key and its PIN, without the drive PINs.*
+**Claim:** deniable against a single seizure of an honest server plus the security key and
+its PIN, without the drive PINs.
 
 ## 2. Measured hardware assumptions
 
@@ -231,9 +231,9 @@ file references it. No allocation map is stored.
 
 **Commit** (copy-on-write): write file blocks into free blocks; write the new metadata into
 free blocks; write the older header copy with `generation + 1`; finally overwrite the
-*previous* metadata blocks with fresh random bytes. The last step matters: old metadata holds
-the keys of deleted files, and the drive key is long-lived, so a coerced drive PIN would
-otherwise recover "deleted" files. Freed file blocks need no wiping once no metadata
+*previous* metadata blocks with fresh random bytes. Old metadata holds the keys of deleted
+files and the drive key is long-lived, so without this step a coerced drive PIN would recover
+"deleted" files. Freed file blocks need no wiping once no metadata
 references their keys.
 
 Several uploads may share one commit (the desktop app and CLI batch up to 64 files or 10
@@ -267,11 +267,10 @@ cannot know without learning which slots are used. The only limit is the touch: 
 needs a physical touch on that one key (no parallelism; the secret is inside the key), so the
 attacker's rate is bounded by touch speed, roughly 1-2 guesses/s even with a robot.
 
-The cost of a guess is fixed, so strength comes from the number of candidates the user could
-have chosen, not from the length alone. A PIN picked from a small set (digits, dates, common
-words, keyboard patterns) is weak at any length, because the attacker tries likely values
-first. Only the entropy of the user's actual choice counts, and with a coerced adversary who
-may know the user's habits, assume the likeliest choices are tried first.
+The cost per guess is fixed, so strength depends on how many candidates the user could have
+chosen, not on length alone. A PIN picked from a small set (digits, dates, common words,
+keyboard patterns) is weak at any length, because the attacker tries likely values first. Only
+the entropy of the actual choice counts; assume an adversary who knows the user's habits.
 
 Rough budget at 2 guesses/s, about 6 × 10⁷ guesses a year (2²⁶): a uniformly random PIN
 with 30 bits (9 random digits) holds out for years, and 45+ bits (7 random printable

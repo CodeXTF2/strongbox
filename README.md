@@ -22,16 +22,14 @@ indistinguishable, even to someone holding the server, the key and its PIN. See
 
 ## An experiment in deniable encryption
 
-The threat model assumes an adversary can obtain or coerce access to the server and the
-security key, including its PIN, all at one point in time, as well as any piece of information
-they can prove you know. Under that combined snapshot, Strongbox is an experiment in making
-other hidden drives difficult to prove. This is a mitigation against an adversary who can only
-coerce information they know exists, for example through legal compulsion. Such an adversary
-cannot prove that a hidden drive exists, so they have nothing to compel you to reveal. It does
-not stop an adversary who suspects hidden drives, because deniability cannot prove there is
-nothing more. Its claims depend on the assumptions and limits in the
-[deniable-drive design](docs/deniable-drives.md).
-The comic below shows the kind of problem this design is intended to address.
+The threat model assumes the adversary gets the server and the security key with its PIN at
+one point in time, and can coerce anything they can prove you know. Given that snapshot,
+Strongbox tries to make other hidden drives impossible to prove. That helps against an
+adversary who can only compel information they know exists, such as under legal compulsion:
+they cannot prove a hidden drive exists, so there is nothing to compel. It does not help
+against an adversary who merely suspects hidden drives, since nobody can prove there is
+nothing more. The claims depend on the assumptions and limits in the
+[deniable-drive design](docs/deniable-drives.md). The comic below shows the problem.
 
 [![xkcd comic 538, Security](https://imgs.xkcd.com/comics/security.png)](https://xkcd.com/538/)
 
@@ -215,7 +213,7 @@ Plain `http://` is accepted only for localhost. Real deployments go behind TLS (
 
 TLS is treated as optional protection. After sign-up, every API call is sealed in an
 end-to-end encrypted, authenticated channel keyed by a per-key `transport_key` derived from the
-security key's PRF output , so a hostile HTTP/SOCKS proxy, or a forged TLS
+security key's PRF output, so a hostile HTTP/SOCKS proxy, or a forged TLS
 certificate, sees only ciphertext and cannot read, alter, replay or answer requests (it can
 drop or delay them). Nothing is
 pinned or stored on the computer. **Sign up on a network you trust:** sign-up (and the
@@ -256,24 +254,10 @@ plain HTTP to remote hosts. `crates/client/tests/hostile_proxy.rs` puts a record
 proxy between client and server: nothing but ciphertext crosses it, and replayed, forged,
 tampered and impersonated messages are refused.
 
-## Status
-
-Early prototype. **Not audited.** Before relying on it:
-
-- The desktop app has been tested on a YubiKey C NFC (firmware 5.8). A raw CTAP probe also confirmed touch enforcement
-  and credProtect on a YubiKey 5, firmware 5.8. Cross-platform PRF equality still needs
-  confirming on hardware.
-- See the hardening backlog in [docs/server-plan.md](docs/server-plan.md#3-hardening-backlog).
-
-There are no recovery codes: any recovery secret would be something a record or the server could
-point at, and deniability comes first. Grant at least two security keys to every vault you care
-about. Losing every key that opens a vault, or its passphrase, means losing the data. Nobody,
-including the server operator, can recover it.
-
 ## References
 
 - [FidoVault](https://github.com/tmo1/fidovault): a reference for Strongbox's multi-authenticator
-  multi-authenticator design.
+  design.
 - [Deniable encryption](https://en.wikipedia.org/wiki/Deniable_encryption): Made me go down this rabbithole.
 
 ## License
