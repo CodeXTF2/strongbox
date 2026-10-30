@@ -89,8 +89,9 @@ server: vault = 100 slots × fixed number of fixed-size blocks, all random from 
 
 - **Usernames are secrets.** `Argon2id(username, salt = H(label ‖ server_id))`, 64 MiB,
   t = 3, p = 4, gives the **lookup id** (the server's index) and the **record key**. The
-  record is the AEAD-encrypted list of credential ids of the username's keys, padded to a
-  fixed size (`RECORD_LEN`) so it does not reveal how many keys there are.
+  record is AEAD-encrypted CBOR holding the credential ids of the username's keys, their
+  account-member labels and the account's random PRF seed (§5), padded to a fixed size
+  (`RECORD_LEN`, 8 KiB of plaintext) so it does not reveal how many keys there are.
 - `GET /v2/lookup/{id}` returns the record, or for an unknown id a decoy derived from a
   server secret: stable across requests and the same size, so probing usernames online
   reveals nothing. (Creating a vault does reveal whether a username is taken; keep
@@ -164,9 +165,10 @@ recovery is a backup security key granted to the drive.
 ## 6. Layout and formats
 
 `BLOCK = 256 KiB`. Every stored unit is one block. A vault is `SLOTS × BLOCKS_PER_SLOT`
-blocks (server-wide constants; every vault on a server has the same layout, otherwise the
-layout itself would be a signal). Default `SLOTS = 100`, `BLOCKS_PER_SLOT = 1024`
-(256 MiB per drive, 25 GiB per vault).
+blocks (server-wide; every vault on a server has the same layout, otherwise the layout itself
+would be a signal). The operator sets it on the first start (`--drives-per-vault`,
+`--drive-size`) and it is fixed for that data directory afterwards. Default `SLOTS = 100`,
+`BLOCKS_PER_SLOT = 1024` (256 MiB per drive, 25 GiB per vault).
 
 ### Sealed block
 
@@ -239,8 +241,10 @@ the commit, as during a single upload. A batch that replaces an existing file is
 at once, so the old file's key is wiped as promptly as without batching. A batch is refused if
 the drive was committed by anything else since the batch began.
 
-**Creating or resetting a drive** writes both header copies with fresh random entries, a new
-random drive key and empty metadata. The rest of the slot is left as is (it is
+**Creating or resetting a drive** picks a new random drive key and fresh random entries
+(only the first holds the new key). Header copy 1 is overwritten with random bytes, so an
+older header that still opens with the same PIN cannot outrank the new drive, and the first
+commit then writes copy 0 with empty metadata. The rest of the slot is left as is (it is
 indistinguishable from filler once no key references it). Resetting an in-use slot destroys
 that drive; the UI says so every time, since it cannot know.
 
@@ -248,8 +252,8 @@ that drive; the UI says so every time, since it cannot know.
 
 Opening a drive downloads its two header copies (32 KiB) and its metadata blocks (typically
 one, 256 KiB), whatever the drive's size; the tree is then decrypted and browsed in memory.
-File blocks are fetched only when a file is downloaded or previewed, with a few requests in
-flight at once. A commit re-reads the two header copies, then writes file blocks (for
+File blocks are fetched only when a file is downloaded or previewed, in runs of up to 32
+blocks per request (`MAX_BLOCKS_PER_REQUEST`) with three requests in flight at once. A commit re-reads the two header copies, then writes file blocks (for
 uploads), new metadata, one header copy and the wipe of the old metadata.
 
 On-demand access is why a live or recording server can see which slot is in use (§1):
@@ -279,6 +283,7 @@ measure entropy. It recommends a random passphrase or a long random string.
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
+| `GET /v1/info` | – | server id, registration mode and vault layout (in the clear; the client re-fetches it as `GET /v2/info` inside the channel and compares) |
 | `POST /v2/invite/check` | none | dry-run of the sign-up invite check (spends nothing), so the client rejects a bad code before asking for a key touch |
 | `POST /v2/vaults` | invite/open | create a vault (allocates and fills all slots) with its username record and first member |
 | `GET /v2/lookup/{id}` | – (rate-limited) | encrypted credential record, or a stable decoy |
@@ -286,16 +291,19 @@ measure entropy. It recommends a random passphrase or a long random string.
 | `DELETE /v2/vaults` | bearer | delete the account: its record, members and every drive |
 | `POST /v2/auth/challenge` | – | challenge for a locator; unknown locators get an equally random one |
 | `POST /v2/auth/session` | – | Ed25519 signature over the challenge → bearer token |
-| `GET /v2/members`, `POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys (last member cannot be removed) |
+| `GET /v2/members`, `POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys (at most 32 members; the last member cannot be removed) |
 | `GET /v2/slots/{slot}/blocks?start&count` | bearer | read whole blocks |
 | `PUT /v2/slots/{slot}/blocks?start` | bearer | write whole blocks (body = n × BLOCK) |
 | `GET /v2/slots/{slot}/headers` | bearer | both header copies (`HEADER_LEN` bytes each) |
-| `PUT /v2/slots/{slot}/headers/{copy}` | bearer | replace one header copy (body = `HEADER_LEN` bytes) |
+| `PUT /v2/slots/{slot}/headers/{copy}` | bearer | replace one header copy (clients send `HEADER_LEN` bytes) |
 | `POST /v2/channel`, `POST /v2/rpc` | – | the sealed channel (§8.1) |
 
-Only `GET /v1/info`, `GET /v2/lookup/{id}`, `POST /v2/vaults`, `POST /v2/channel` and
-`POST /v2/rpc` are served in the clear. Every other row above is reachable only as a request
-carried inside the sealed channel (anywhere else it is a 404).
+Block requests carry at most `MAX_BLOCKS_PER_REQUEST` (32) blocks.
+
+Only `GET /v1/info`, `GET /v2/lookup/{id}`, `POST /v2/invite/check`, `POST /v2/vaults`,
+`POST /v2/channel` and `POST /v2/rpc` are served in the clear. Every other row above
+(including `GET /v2/info`) is reachable only as a request carried inside the sealed channel
+(anywhere else it is a 404).
 
 ### 8.1 Sealed channel
 
@@ -363,11 +371,12 @@ Deniability requirements on the server:
   id, no version cache. The user signs in with the server URL, username and an account key,
   then opens individual drives by slot number and drive PIN. The CLI
   reads the username at a hidden prompt (never from arguments, which end up in shell history).
-- Consequence: no rollback detection across restarts. A server can serve an old header
-  generation. Within a session the client rejects generations lower than it has seen.
+- Consequence: no rollback detection. A server can serve an old header generation, and
+  opening a drive trusts the newest copy it is shown. The only check is at commit time: the
+  client re-reads the header copies and aborts if the generation is not the one it opened.
 - One writer per drive at a time. Two devices writing the same drive concurrently can corrupt
-  it (the server cannot arbitrate without knowing the layout). v1 detects a moved header
-  generation before committing and aborts.
+  it (the server cannot arbitrate without knowing the layout). A moved header generation is
+  detected before committing, which aborts with "close and reopen it".
 
 ## 10. Known limits and future work
 

@@ -1,11 +1,10 @@
-# Strongbox server plan
+# Strongbox server: implementation and hardening backlog
 
 ## 1. What the server is (and is not)
 
 The server is a **blind, untrusted store**. It is trusted for availability only, never for
-confidentiality, and only partly for integrity: clients detect a moved header generation within
-a session (see [deniable-drives.md](deniable-drives.md#9-client-and-device) for what they cannot
-detect across restarts).
+confidentiality, and only partly for integrity: clients detect a moved header generation when committing
+(see [deniable-drives.md](deniable-drives.md#9-client-and-device) for what they cannot detect).
 
 | The server stores | The server never sees |
 |---|---|
@@ -23,21 +22,11 @@ members of each. See §4 for mitigations.
 `crates/server`: Rust, axum, SQLite (rollback journal, `secure_delete`) for the small metadata tables, one
 fixed-size file per vault, single binary.
 
-| Endpoint | Auth | Purpose |
-|---|---|---|
-| `GET /v1/info` | – | server id, registration mode, vault layout |
-| `POST /v2/vaults` | invite/open | create an account and allocate its vault (carries the first member's transport key; sent in the clear, so sign up on a trusted network) |
-| `POST /v2/channel`, `POST /v2/rpc` | – | sealed channel: every other call below travels inside it (see [deniable-drives.md §8.1](deniable-drives.md#81-sealed-channel)) |
-| `DELETE /v2/vaults` | bearer | delete the account and every drive |
-| `GET /v2/lookup/{id}` | – (rate-limited) | encrypted credential record, or a stable decoy |
-| `PUT /v2/record` | bearer | replace the record (backup keys) |
-| `POST /v2/auth/challenge`, `POST /v2/auth/session` | – (rate-limited) | Ed25519 challenge/response, returns a bearer token |
-| `DELETE /v2/auth/session` | bearer | logout |
-| `GET/POST /v2/members`, `DELETE /v2/members/{id}` | bearer | manage keys (the last member cannot be removed) |
-| `GET/PUT /v2/slots/{slot}/blocks` | bearer | read and write whole blocks |
-| `GET/PUT /v2/slots/{slot}/headers` | bearer | read both header copies, write one |
-
-Details of each endpoint are in [deniable-drives.md](deniable-drives.md#8-server-v2).
+The full route table (auth, purpose, which routes are in the clear) is in
+[deniable-drives.md §8](deniable-drives.md#8-server-v2); every route except sign-up, the record
+lookup and the invite check travels inside the sealed channel
+([§8.1](deniable-drives.md#81-sealed-channel)). The admin page is a separate loopback-only
+listener (see the README).
 
 Properties already in place: sessions and challenges live in memory only and are stored as
 SHA-256(token); single-use 2-minute challenges; per-IP token bucket on pre-login routes

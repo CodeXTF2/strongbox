@@ -264,7 +264,7 @@ Early prototype. **Not audited.** Before relying on it:
   and credProtect on a YubiKey 5, firmware 5.8. Cross-platform PRF equality still needs
   confirming on hardware.
 - Desktop vault flows have not yet been run against a physical security key.
-- See the hardening backlog in [docs/server-plan.md](docs/server-plan.md#6-security-hardening-backlog).
+- See the hardening backlog in [docs/server-plan.md](docs/server-plan.md#3-hardening-backlog).
 
 There are no recovery codes: any recovery secret would be something a record or the server could
 point at, and deniability comes first. Grant at least two security keys to every vault you care
